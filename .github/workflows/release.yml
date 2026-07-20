@@ -1,0 +1,44 @@
+name: Release
+
+# Tag-triggered publish of the `internxt-core` crate to crates.io. Push a `v*`
+# tag whose number matches the `version` in Cargo.toml. The cli lives in its own
+# repo (internxt-cli-rust) and is released separately.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    # crates.io versions are permanent, so skip pre-release tags (a `-`, e.g.
+    # v0.1.0-rc.1): they'd leave a permanent published version behind.
+    if: ${{ !contains(github.ref_name, '-') }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Guard against a tag/manifest mismatch — publishing the wrong version is
+      # irreversible on crates.io.
+      - name: Check tag matches Cargo.toml version
+        run: |
+          set -eux
+          tag="${GITHUB_REF_NAME#v}"
+          manifest="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          if [[ "$tag" != "$manifest" ]]; then
+            echo "tag v$tag != Cargo.toml version $manifest" >&2
+            exit 1
+          fi
+
+      - run: cargo test
+
+      - run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
