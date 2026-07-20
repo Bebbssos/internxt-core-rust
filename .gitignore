@@ -1,0 +1,7 @@
+# Rust build output
+/target
+Cargo.lock
+
+# Editor / OS
+.DS_Store
+*.swp

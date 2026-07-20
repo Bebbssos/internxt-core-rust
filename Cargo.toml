@@ -5,7 +5,10 @@ edition = "2024"
 rust-version = "1.85"
 license = "AGPL-3.0-or-later"
 description = "Internxt Drive engine: auth, crypto, Drive REST + streaming network transfers"
-repository = "https://github.com/Bebbssos/internxt-rust"
+repository = "https://github.com/Bebbssos/internxt-core-rust"
+readme = "README.md"
+keywords = ["internxt", "drive", "e2ee", "storage", "crypto"]
+categories = ["cryptography", "api-bindings", "filesystem"]
 
 [lib]
 name = "internxt_core"
@@ -57,3 +60,7 @@ bip39 = "2"
 pgp = "0.19"
 safe_pqc_kyber = { version = "0.6", default-features = false, features = ["kyber512", "std"] }
 blake3 = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
