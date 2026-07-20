@@ -3,7 +3,4 @@ Copyright (c) 2026 Bebbssos
 
 Licensed under the MIT License. See the LICENSE file.
 
-This is an unofficial, independent Rust reimplementation. It is not affiliated
-with, endorsed by, or supported by Internxt. It is a clean-room reimplementation
-that mirrors observable protocol behaviour in order to interoperate with the
-Internxt service; it is not a copy or translation of any upstream source.
+Unofficial. Not affiliated with, endorsed by, or supported by Internxt.
