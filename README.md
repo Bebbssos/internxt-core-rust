@@ -36,5 +36,4 @@ against reference test vectors (`cargo test`, no network).
 
 ## License
 
-[AGPL-3.0-or-later](LICENSE). See [NOTICE](NOTICE) for upstream attribution and the
-rationale for the AGPL choice.
+[MIT](LICENSE).
