@@ -48,7 +48,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 aes = "0.9"
 cbc = { version = "0.2", features = ["alloc"] }
 ctr = "0.10"
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 pbkdf2 = "0.13"
 sha1 = "0.11"
 sha2 = "0.11"
@@ -57,7 +57,7 @@ md-5 = "0.11"
 hmac = "0.13"
 cipher = "0.5"
 bip39 = "2"
-pgp = "0.19"
+pgp = "0.20"
 safe_pqc_kyber = { version = "0.6", default-features = false, features = ["kyber512", "std"] }
 blake3 = "1"
 
