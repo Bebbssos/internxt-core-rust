@@ -198,6 +198,17 @@ fn refresh_required(exp: i64, iat: Option<i64>, now: i64) -> bool {
     remaining <= threshold
 }
 
+/// Like `refresh_required`, but also returns `true` for an already-expired
+/// token. Used for the workspace-token path, which — unlike the main-token
+/// path in `refresh_credentials` — has no separate early "already expired"
+/// guard before this check, so `refresh_required`'s "already expired -> false"
+/// branch must not be mistaken for "no refresh needed" here: an expired
+/// workspace token still needs a refresh attempt (and a hard error if that
+/// attempt fails), not silent reuse.
+fn ws_refresh_required(exp: i64, iat: Option<i64>, now: i64) -> bool {
+    exp - now <= 0 || refresh_required(exp, iat, now)
+}
+
 /// Validates and, mirroring node's `getAuthDetails`, refreshes credentials when
 /// the token is within two days of expiry. Pure: takes the current credentials
 /// and returns the (possibly-updated) ones plus a `changed` flag — persistence is
@@ -246,10 +257,19 @@ pub async fn refresh_credentials(
 
     // Refresh the workspace credentials when their token is near/at expiry, by
     // re-fetching them (the network creds + tokenHeader rotate; the mnemonic and
-    // root folder are stable). Best-effort, like the user-token refresh.
+    // root folder are stable). Best-effort, like the user-token refresh — *unless*
+    // the workspace token is already expired: `refresh_required` returns `false`
+    // for an already-expired token (see its doc comment), so without this check
+    // an expired workspace token would be silently treated as "no refresh
+    // needed" and kept as-is, leading to opaque 401s on every workspace call
+    // downstream. When already expired we still attempt a refresh (unlike the
+    // main-token path, which errors out immediately), but a failed attempt is a
+    // hard error rather than a warning, since there is no fallback valid session.
     if let Some(ws) = &creds.workspace {
-        let ws_refresh_required = jwt_claims(&ws.token)
-            .map(|(exp, iat)| refresh_required(exp, iat, now))
+        let ws_claims = jwt_claims(&ws.token);
+        let ws_expired = ws_claims.map(|(exp, _)| exp - now <= 0).unwrap_or(true);
+        let ws_refresh_required = ws_claims
+            .map(|(exp, iat)| ws_refresh_required(exp, iat, now))
             .unwrap_or(true);
         if ws_refresh_required {
             match refresh_workspace_credentials(&creds.token, ws.id.clone()).await {
@@ -262,8 +282,19 @@ pub async fn refresh_credentials(
                     }
                     changed = true;
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    if ws_expired {
+                        return Err(anyhow!(
+                            "Your workspace session has expired. Run `internxt login` again."
+                        ));
+                    }
+                }
                 Err(e) => {
+                    if ws_expired {
+                        return Err(anyhow!(
+                            "Your workspace session has expired and could not be refreshed: {e}"
+                        ));
+                    }
                     on_warn(&format!("workspace refresh failed: {e}"));
                 }
             }
@@ -360,6 +391,20 @@ mod tests {
         assert!(refresh_required(exp, Some(iat), exp - 500));
         assert!(refresh_required(exp, Some(iat), exp - 1));
         assert!(!refresh_required(exp, Some(iat), exp)); // already expired -> false
+    }
+
+    #[test]
+    fn ws_refresh_required_treats_expired_as_needing_refresh() {
+        let iat = 1_000_000;
+        let exp = 1_000_000 + 1000; // 1000s lifetime -> 500s threshold
+        // Same as `refresh_required` while the token is still valid.
+        assert!(!ws_refresh_required(exp, Some(iat), exp - 501));
+        assert!(ws_refresh_required(exp, Some(iat), exp - 500));
+        // Unlike `refresh_required`, an already-expired token is also
+        // "refresh required" — this is the bug fix under test: without it,
+        // an expired workspace token would be silently treated as fine.
+        assert!(ws_refresh_required(exp, Some(iat), exp));
+        assert!(ws_refresh_required(exp, Some(iat), exp + 1));
     }
 
     #[test]
