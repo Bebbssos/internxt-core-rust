@@ -8,10 +8,10 @@ end-to-end crypto, the Drive REST API, and fully streaming network transfers.
 > Written mostly by [Claude Code](https://claude.com/claude-code), porting the
 > behaviour of Internxt's official Node/TypeScript packages.
 
-This crate is the protocol-agnostic core extracted from
-[`internxt-cli`](https://github.com/Bebbssos/internxt-cli-rust) (binary `ixr`). It has
-no terminal, clap, or filesystem-credential dependencies, so it works equally under
-a CLI, a WebDAV/FUSE server, or a GUI. Progress reporting, 2FA, browser-open, and
+This crate is the protocol-agnostic core used by
+[`internxt-cli-rust`](https://github.com/Bebbssos/internxt-cli-rust). It has no
+terminal, clap, or filesystem-credential dependencies, so it works equally under a CLI,
+a WebDAV/FUSE server, or a GUI. Progress reporting, 2FA, browser-open, and
 refresh-warning are injected as closures/traits by the caller.
 
 ## Status
