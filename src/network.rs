@@ -9,10 +9,25 @@ use futures_util::Stream;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
 use reqwest::{Body, Client, Response};
 use serde_json::json;
+use std::time::Duration;
 
 use crate::config;
 use crate::crypto;
 use crate::models::{DownloadLinksResponse, FinishUploadResponse, StartUploadResponse};
+
+/// Connecting to a reachable host should be fast; anything slower almost
+/// certainly means a dead peer or a firewalled black hole.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// This client carries both small metadata calls (start/finish upload,
+/// download-links) *and* large streamed transfer bodies (presigned S3-style
+/// PUT/GET of shards, which can legitimately run as long as a 100GB
+/// upload/download takes). A total request timeout would wrongly abort those
+/// large transfers, so we don't set one here. Instead we use a *read*
+/// timeout: it fires only when a read produces no data for this long,
+/// resetting on every successful read — it catches a truly stalled/idle
+/// connection (dead peer, black hole, unresponsive presigned URL) without
+/// capping total transfer duration.
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct NetworkApi {
@@ -33,8 +48,13 @@ impl NetworkApi {
         let password = crypto::network_password(user_id);
         let token = format!("{bridge_user}:{password}");
         let encoded = B64.encode(token.as_bytes());
+        let client = Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT)
+            .build()
+            .unwrap_or_default();
         NetworkApi {
-            client: Client::new(),
+            client,
             base: config::network_url(),
             auth_header: HeaderValue::from_str(&format!("Basic {encoded}")).unwrap(),
         }

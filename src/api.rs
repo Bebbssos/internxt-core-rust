@@ -4,9 +4,21 @@ use anyhow::{anyhow, Result};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Client;
 use serde_json::{json, Value};
+use std::time::Duration;
 
 use crate::config;
 use crate::models::{Credentials, DriveFileData};
+
+/// Connecting to a reachable API host should be fast; anything slower almost
+/// certainly means a dead peer or a firewalled black hole rather than a slow
+/// server, so we don't let it hang indefinitely.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Every [`DriveApi`] call is a small metadata/JSON request (auth, folder
+/// listings, file entry CRUD, ...) — never a large file body (those go
+/// through [`crate::network::NetworkApi`] to presigned storage URLs). So it's
+/// safe, and desirable, to cap the *total* request duration here — unlike the
+/// network client, which streams large bodies and must not be capped this way.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct DriveApi {
     client: Client,
@@ -37,8 +49,13 @@ fn base_headers() -> HeaderMap {
 
 impl DriveApi {
     pub fn new() -> Self {
+        let client = Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .unwrap_or_default();
         DriveApi {
-            client: Client::new(),
+            client,
             base: config::drive_api_url(),
             workspace: None,
         }
