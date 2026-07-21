@@ -117,8 +117,9 @@ pub fn decrypt_private_key(private_key_b64: &str, password: &str) -> Result<Stri
     let cipher = Aes256GcmIv16::new_from_slice(&key).map_err(|e| anyhow!("gcm key: {e}"))?;
     let mut buf = ct.to_vec();
     buf.extend_from_slice(tag);
+    let nonce = Nonce::<U16>::try_from(iv).map_err(|_| anyhow!("invalid iv length"))?;
     let pt = cipher
-        .decrypt(Nonce::<U16>::from_slice(iv), buf.as_ref())
+        .decrypt(&nonce, buf.as_ref())
         .map_err(|_| anyhow!("Private key is corrupted"))?;
     Ok(String::from_utf8(pt)?)
 }

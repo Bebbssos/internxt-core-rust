@@ -39,6 +39,6 @@ jobs:
             exit 1
           fi
 
-      - run: cargo test
+      - run: cargo test --all-features
 
       - run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
