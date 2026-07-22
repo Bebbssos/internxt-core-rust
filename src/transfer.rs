@@ -35,7 +35,7 @@ const UPLOAD_CONCURRENCY: usize = 10;
 #[cfg(feature = "fs")]
 const FOLDER_CREATE_RETRIES: usize = 2;
 #[cfg(feature = "fs")]
-const RETRY_DELAYS_MS: [u64; 3] = [500, 1000, 2000];
+const RETRY_DELAYS_MS: [u64; 2] = [500, 1000];
 
 /// Encrypt + upload a file's bytes to the network, returning the network file id.
 /// Picks single-part or multipart based on size. Shared by upload-file / upload-folder.
@@ -211,9 +211,32 @@ async fn upload_multipart(
     }
 
     let mut parts = Vec::with_capacity(handles.len());
-    for h in handles {
-        let p = h.await.map_err(|e| anyhow!("part task panicked: {e}"))??;
-        parts.push(p);
+    let mut iter = handles.into_iter();
+    let mut result: Result<()> = Ok(());
+    for h in iter.by_ref() {
+        match h.await {
+            Ok(Ok(p)) => parts.push(p),
+            Ok(Err(e)) => {
+                result = Err(e);
+                break;
+            }
+            Err(e) => {
+                result = Err(anyhow!("part task panicked: {e}"));
+                break;
+            }
+        }
+    }
+    if let Err(e) = result {
+        // Some parts may still be uploading in the background; a dropped
+        // JoinHandle does NOT cancel the task, so abort the rest explicitly
+        // to stop wasting bandwidth. Note: there's no server-side "abort
+        // multipart upload" API exposed by the bridge today, so the
+        // incomplete multipart session on the storage side may still linger
+        // until it expires there — that's a separate, larger fix.
+        for h in iter {
+            h.abort();
+        }
+        return Err(e);
     }
     parts.sort_by_key(|p| p.part_number);
 
