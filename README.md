@@ -1,4 +1,4 @@
-# internxt-core
+# internxt-core-rust
 
 Unofficial Rust engine for [Internxt Drive](https://internxt.com): authentication,
 end-to-end crypto, the Drive REST API, and fully streaming network transfers.
