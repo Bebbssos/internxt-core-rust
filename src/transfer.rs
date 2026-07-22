@@ -397,7 +397,15 @@ where
     Ok(())
 }
 
-/// Create a folder, retrying transient failures; returns None if it already exists.
+/// Create a folder, retrying transient failures. If the API reports the folder
+/// already exists, looks up and returns the *existing* folder's uuid instead of
+/// giving up — paginating the parent's subfolders (via [`DriveApi::get_folder_subfolders`])
+/// and matching by exact name, the same "list children, match by name" pattern
+/// `internxt-cli-rust`'s serve-tree cache-miss fallback uses. This lets callers keep
+/// using the returned uuid as a parent for further creates, instead of treating a
+/// name collision as a hard failure. Returns `Ok(None)` only if that lookup fails to
+/// find a match (e.g. a race where the folder was renamed/deleted between the
+/// conflict and the lookup) or after non-conflict retries are exhausted.
 ///
 /// Requires the `fs` feature (uses `tokio::time` for retry backoff).
 #[cfg(feature = "fs")]
@@ -415,7 +423,7 @@ pub async fn create_folder_with_retry(
             }
             Err(e) => {
                 if e.to_string().to_lowercase().contains("already exists") {
-                    return Ok(None);
+                    return find_existing_folder(api, token, parent_uuid, name).await;
                 }
                 if attempt < FOLDER_CREATE_RETRIES {
                     tokio::time::sleep(std::time::Duration::from_millis(RETRY_DELAYS_MS[attempt]))
@@ -427,4 +435,215 @@ pub async fn create_folder_with_retry(
         }
     }
     Ok(None)
+}
+
+/// Look up a direct subfolder of `parent_uuid` by exact (plain) name, paginating
+/// through `get_folder_subfolders` (50 per page) until a match is found or the
+/// listing is exhausted. Only `EXISTS`-status entries count — a trashed/deleted
+/// folder with the same name doesn't count as a collision.
+#[cfg(feature = "fs")]
+async fn find_existing_folder(
+    api: &DriveApi,
+    token: &str,
+    parent_uuid: &str,
+    name: &str,
+) -> Result<Option<String>> {
+    let mut offset: u32 = 0;
+    loop {
+        let page = api.get_folder_subfolders(token, parent_uuid, offset).await?;
+        let items = page
+            .get("folders")
+            .or_else(|| page.get("result"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let got = items.len() as u32;
+        for item in &items {
+            let status = item.get("status").and_then(|s| s.as_str()).unwrap_or("");
+            if !status.is_empty() && status != "EXISTS" {
+                continue;
+            }
+            let plain_name = item.get("plainName").and_then(|s| s.as_str()).unwrap_or("");
+            if plain_name == name {
+                let uuid = item.get("uuid").and_then(|s| s.as_str()).unwrap_or_default();
+                if !uuid.is_empty() {
+                    return Ok(Some(uuid.to_string()));
+                }
+            }
+        }
+        if got < 50 {
+            return Ok(None);
+        }
+        offset += got;
+    }
+}
+
+/// Tests for `create_folder_with_retry`'s "already exists" handling. `DriveApi`
+/// has no mock/injection seam and this crate has no HTTP-mocking dev-dependency,
+/// so these spin up a tiny hand-rolled HTTP/1.1 server on localhost and point
+/// `DriveApi` at it via the `DRIVE_NEW_API_URL` env override (read fresh on every
+/// `DriveApi::new()` call, see `config::drive_api_url`). Each mocked response sets
+/// `Connection: close` so the client opens a fresh connection per call, keeping
+/// "which request is this" trivial without a real request router.
+#[cfg(all(test, feature = "fs"))]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    /// Serialize access to the `DRIVE_NEW_API_URL` env var: tests in this module
+    /// run in separate threads by default, and the var is process-global.
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
+        hay.windows(needle.len()).position(|w| w == needle)
+    }
+
+    fn read_request(stream: &mut std::net::TcpStream) -> String {
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_millis(1000)))
+            .ok();
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
+                        let header_str = String::from_utf8_lossy(&buf[..pos]).to_string();
+                        let cl: usize = header_str
+                            .lines()
+                            .find_map(|l| {
+                                let lower = l.to_lowercase();
+                                lower.strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0))
+                            })
+                            .unwrap_or(0);
+                        if buf.len() >= pos + 4 + cl {
+                            break;
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        String::from_utf8_lossy(&buf).to_string()
+    }
+
+    /// Spins up a background thread serving `responses.len()` sequential
+    /// connections, in order, then returns the `http://host:port` base to point
+    /// `DriveApi` at.
+    fn mock_server(responses: Vec<(u16, &'static str, String)>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for (status, reason, body) in responses {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let _req = read_request(&mut stream);
+                    let resp = format!(
+                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    let _ = stream.flush();
+                }
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn already_exists_resolves_to_existing_uuid() {
+        let _guard = ENV_LOCK.lock().await;
+        let base = mock_server(vec![
+            (
+                409,
+                "Conflict",
+                r#"{"message":"Folder already exists"}"#.to_string(),
+            ),
+            (
+                200,
+                "OK",
+                r#"{"folders":[{"uuid":"existing-uuid","plainName":"docs","status":"EXISTS"}]}"#
+                    .to_string(),
+            ),
+        ]);
+        unsafe { std::env::set_var("DRIVE_NEW_API_URL", &base) };
+        let api = DriveApi::new();
+        let result = create_folder_with_retry(&api, "tok", "docs", "parent-uuid")
+            .await
+            .unwrap();
+        unsafe { std::env::remove_var("DRIVE_NEW_API_URL") };
+        assert_eq!(result, Some("existing-uuid".to_string()));
+    }
+
+    #[tokio::test]
+    async fn already_exists_but_lookup_finds_no_match_returns_none() {
+        let _guard = ENV_LOCK.lock().await;
+        let base = mock_server(vec![
+            (
+                409,
+                "Conflict",
+                r#"{"message":"Folder already exists"}"#.to_string(),
+            ),
+            (200, "OK", r#"{"folders":[]}"#.to_string()),
+        ]);
+        unsafe { std::env::set_var("DRIVE_NEW_API_URL", &base) };
+        let api = DriveApi::new();
+        let result = create_folder_with_retry(&api, "tok", "docs", "parent-uuid")
+            .await
+            .unwrap();
+        unsafe { std::env::remove_var("DRIVE_NEW_API_URL") };
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn already_exists_skips_non_exists_status_and_paginates() {
+        let _guard = ENV_LOCK.lock().await;
+        // Page 1: 50 entries (forces a second page) none matching by name (one
+        // matches by name but is TRASHED, so it must not count); page 2 has the
+        // real match.
+        let mut page1_items = vec![
+            r#"{"uuid":"trashed-uuid","plainName":"docs","status":"TRASHED"}"#.to_string(),
+        ];
+        for i in 0..49 {
+            page1_items.push(format!(r#"{{"uuid":"other-{i}","plainName":"other-{i}","status":"EXISTS"}}"#));
+        }
+        let page1 = format!(r#"{{"folders":[{}]}}"#, page1_items.join(","));
+        let page2 =
+            r#"{"folders":[{"uuid":"real-uuid","plainName":"docs","status":"EXISTS"}]}"#.to_string();
+        let base = mock_server(vec![
+            (
+                409,
+                "Conflict",
+                r#"{"message":"Folder already exists"}"#.to_string(),
+            ),
+            (200, "OK", page1),
+            (200, "OK", page2),
+        ]);
+        unsafe { std::env::set_var("DRIVE_NEW_API_URL", &base) };
+        let api = DriveApi::new();
+        let result = create_folder_with_retry(&api, "tok", "docs", "parent-uuid")
+            .await
+            .unwrap();
+        unsafe { std::env::remove_var("DRIVE_NEW_API_URL") };
+        assert_eq!(result, Some("real-uuid".to_string()));
+    }
+
+    #[tokio::test]
+    async fn create_succeeds_returns_new_uuid_without_lookup() {
+        let _guard = ENV_LOCK.lock().await;
+        let base = mock_server(vec![(
+            200,
+            "OK",
+            r#"{"uuid":"brand-new-uuid","plainName":"docs"}"#.to_string(),
+        )]);
+        unsafe { std::env::set_var("DRIVE_NEW_API_URL", &base) };
+        let api = DriveApi::new();
+        let result = create_folder_with_retry(&api, "tok", "docs", "parent-uuid")
+            .await
+            .unwrap();
+        unsafe { std::env::remove_var("DRIVE_NEW_API_URL") };
+        assert_eq!(result, Some("brand-new-uuid".to_string()));
+    }
 }
