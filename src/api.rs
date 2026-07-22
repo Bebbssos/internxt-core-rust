@@ -12,13 +12,29 @@ use crate::models::{Credentials, DriveFileData};
 /// Connecting to a reachable API host should be fast; anything slower almost
 /// certainly means a dead peer or a firewalled black hole rather than a slow
 /// server, so we don't let it hang indefinitely.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Every [`DriveApi`] call is a small metadata/JSON request (auth, folder
 /// listings, file entry CRUD, ...) — never a large file body (those go
 /// through [`crate::network::NetworkApi`] to presigned storage URLs). So it's
 /// safe, and desirable, to cap the *total* request duration here — unlike the
 /// network client, which streams large bodies and must not be capped this way.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Timeouts for [`DriveApi`]'s HTTP client.
+#[derive(Clone, Copy, Debug)]
+pub struct DriveTimeouts {
+    pub connect: Duration,
+    pub request: Duration,
+}
+
+impl Default for DriveTimeouts {
+    fn default() -> Self {
+        DriveTimeouts {
+            connect: DEFAULT_CONNECT_TIMEOUT,
+            request: DEFAULT_REQUEST_TIMEOUT,
+        }
+    }
+}
 
 pub struct DriveApi {
     client: Client,
@@ -49,9 +65,15 @@ fn base_headers() -> HeaderMap {
 
 impl DriveApi {
     pub fn new() -> Self {
+        Self::with_timeouts(DriveTimeouts::default())
+    }
+
+    /// Same as [`Self::new`], with caller-adjustable timeouts (e.g. so
+    /// `internxt-cli-rust` can widen them via a flag/env var).
+    pub fn with_timeouts(timeouts: DriveTimeouts) -> Self {
         let client = Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
+            .connect_timeout(timeouts.connect)
+            .timeout(timeouts.request)
             .build()
             .unwrap_or_default();
         DriveApi {

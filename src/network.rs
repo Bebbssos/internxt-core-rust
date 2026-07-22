@@ -17,21 +17,51 @@ use crate::models::{DownloadLinksResponse, FinishUploadResponse, StartUploadResp
 
 /// Connecting to a reachable host should be fast; anything slower almost
 /// certainly means a dead peer or a firewalled black hole.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-/// This client carries both small metadata calls (start/finish upload,
-/// download-links) *and* large streamed transfer bodies (presigned S3-style
-/// PUT/GET of shards, which can legitimately run as long as a 100GB
-/// upload/download takes). A total request timeout would wrongly abort those
-/// large transfers, so we don't set one here. Instead we use a *read*
-/// timeout: it fires only when a read produces no data for this long,
-/// resetting on every successful read — it catches a truly stalled/idle
-/// connection (dead peer, black hole, unresponsive presigned URL) without
-/// capping total transfer duration.
-const READ_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Idle-read timeout for the download/metadata leg (start/finish upload,
+/// download-links, and shard GETs) — reqwest resets it on every successful
+/// response-body read, so it only fires on a truly stalled/idle connection
+/// (dead peer, black hole, unresponsive presigned URL) and never caps total
+/// download duration.
+///
+/// Deliberately **not** applied to the upload (PUT) leg: reqwest 0.13's
+/// `read_timeout` is a single non-resetting deadline covering connect →
+/// body-send → response-headers, so on a PUT (whose 200 OK only arrives
+/// after the whole body has been received by the server) it behaves as a
+/// hard cap on *total upload duration* rather than an idle-stall detector —
+/// it would abort a slow-but-healthy upload (e.g. a slow `--stdin` producer,
+/// or any large file over a modest link) exactly as readily as a genuinely
+/// dead connection. See `upload_client` below.
+const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Timeouts for [`NetworkApi`]'s HTTP clients. `read` applies only to the
+/// download/metadata leg (see [`DEFAULT_READ_TIMEOUT`]) — the upload leg
+/// only ever gets `connect`, never a read/total timeout, since reqwest can't
+/// express "abort on stall" for a streamed PUT without also aborting slow
+/// producers. Pass `read: None` to disable idle-stall detection on downloads
+/// too.
+#[derive(Clone, Copy, Debug)]
+pub struct NetworkTimeouts {
+    pub connect: Duration,
+    pub read: Option<Duration>,
+}
+
+impl Default for NetworkTimeouts {
+    fn default() -> Self {
+        NetworkTimeouts {
+            connect: DEFAULT_CONNECT_TIMEOUT,
+            read: Some(DEFAULT_READ_TIMEOUT),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct NetworkApi {
+    /// Metadata calls (start/finish upload, download-links) + shard GETs.
     client: Client,
+    /// Shard/part PUTs only — connect timeout, no read/total timeout (see
+    /// [`DEFAULT_READ_TIMEOUT`] doc for why).
+    upload_client: Client,
     base: String,
     auth_header: HeaderValue,
 }
@@ -45,16 +75,30 @@ pub struct PartRef {
 
 impl NetworkApi {
     pub fn new(bridge_user: &str, user_id: &str) -> Self {
+        Self::with_timeouts(bridge_user, user_id, NetworkTimeouts::default())
+    }
+
+    /// Same as [`Self::new`], with caller-adjustable timeouts (e.g. so
+    /// `internxt-cli-rust` can widen or disable them via a flag/env var).
+    pub fn with_timeouts(bridge_user: &str, user_id: &str, timeouts: NetworkTimeouts) -> Self {
         let password = crypto::network_password(user_id);
         let token = format!("{bridge_user}:{password}");
         let encoded = B64.encode(token.as_bytes());
-        let client = Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .read_timeout(READ_TIMEOUT)
+
+        let mut builder = Client::builder().connect_timeout(timeouts.connect);
+        if let Some(read) = timeouts.read {
+            builder = builder.read_timeout(read);
+        }
+        let client = builder.build().unwrap_or_default();
+
+        let upload_client = Client::builder()
+            .connect_timeout(timeouts.connect)
             .build()
             .unwrap_or_default();
+
         NetworkApi {
             client,
+            upload_client,
             base: config::network_url(),
             auth_header: HeaderValue::from_str(&format!("Basic {encoded}")).unwrap(),
         }
@@ -108,7 +152,7 @@ impl NetworkApi {
         S: Stream<Item = std::io::Result<Bytes>> + Send + 'static,
     {
         let resp = self
-            .client
+            .upload_client
             .put(url)
             .header(CONTENT_TYPE, "application/octet-stream")
             .header(CONTENT_LENGTH, len)
@@ -127,7 +171,7 @@ impl NetworkApi {
     pub async fn put_part(&self, url: &str, body: Vec<u8>) -> Result<String> {
         let len = body.len();
         let resp = self
-            .client
+            .upload_client
             .put(url)
             .header(CONTENT_LENGTH, len)
             .body(body)
