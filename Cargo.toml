@@ -17,10 +17,11 @@ path = "src/lib.rs"
 [features]
 default = ["fs", "thumbnails"]
 # Native filesystem + runtime-bound transfer helpers: the path-based upload
-# (`upload_file_to_network`), multipart upload, and `create_folder_with_retry`.
-# These pull in `tokio::fs` / `tokio::spawn` / `tokio::time`. Disable to build only
-# the reader/writer surface (crypto, api, network, and the generic streaming
-# `upload_stream_to_network` / `download_file_to_writer`).
+# (`upload_file_to_network`) and `create_folder_with_retry`. These pull in
+# `tokio::fs` / `tokio::time`. Disable to build only the reader/writer surface
+# (crypto, api, network, and the generic streaming `upload_stream_to_network`
+# / `download_file_to_writer`, which stay multipart-capable without this
+# feature — they only need a sequential `AsyncRead`, not a filesystem).
 fs = []
 # Image thumbnail generation (`thumbnail` module): decode/resize/encode a 300x300
 # PNG preview via the `image` crate. Mirrors og's sharp-based ThumbnailService.
