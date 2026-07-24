@@ -17,20 +17,19 @@ use crate::crypto::{self, Ctr};
 use crate::network::NetworkApi;
 use crate::progress::{noop_sink, ProgressSink};
 
-// fs-only deps (the path-based / multipart / folder-create helpers).
+// fs-only deps (the path-based upload / folder-create helpers).
 #[cfg(feature = "fs")]
 use crate::api::DriveApi;
-#[cfg(feature = "fs")]
 use crate::network::PartRef;
 #[cfg(feature = "fs")]
 use std::path::Path;
 
 const READ_CHUNK: usize = 1024 * 1024; // 1MB stream granularity
-#[cfg(feature = "fs")]
+// Multipart applies to any source (file or live stream) above this size —
+// only the single-PUT path has a hard object-size ceiling on the storage
+// side, so anything bigger must be sliced regardless of where it comes from.
 const MULTIPART_THRESHOLD: u64 = 100 * 1024 * 1024; // 100MB
-#[cfg(feature = "fs")]
 const PART_SIZE: usize = 15 * 1024 * 1024; // 15MB
-#[cfg(feature = "fs")]
 const UPLOAD_CONCURRENCY: usize = 10;
 #[cfg(feature = "fs")]
 const FOLDER_CREATE_RETRIES: usize = 2;
@@ -60,16 +59,20 @@ pub async fn upload_file_to_network(
     let pb = pb.unwrap_or_else(noop_sink);
 
     if size > MULTIPART_THRESHOLD {
-        upload_multipart(net, bucket, size, path, &key, &iv, &index, &pb).await
+        let file = tokio::fs::File::open(path).await?;
+        upload_multipart(net, bucket, size, file, &key, &iv, &index, &pb).await
     } else {
         let file = tokio::fs::File::open(path).await?;
         upload_single(net, bucket, size, file, &key, &iv, &index, &pb).await
     }
 }
 
-/// Encrypt + upload `size` bytes from an arbitrary reader (e.g. stdin), returning
-/// the network file id. Always single-part: the source isn't seekable, so multipart
-/// (which re-slices a buffered stream) doesn't apply — the size must be known.
+/// Encrypt + upload `size` bytes from an arbitrary reader (e.g. stdin, or a live
+/// WebDAV/FUSE/SMB write body), returning the network file id. Picks single-part
+/// or multipart based on size, same threshold as [`upload_file_to_network`] — the
+/// reader only needs to be read sequentially once, so it doesn't need to be
+/// seekable: multipart here reads forward and buffers each 15MB part before
+/// dispatching it, rather than re-slicing an already-buffered file.
 pub async fn upload_stream_to_network<R>(
     net: &NetworkApi,
     bucket: &str,
@@ -86,7 +89,11 @@ where
     let iv = index[0..16].to_vec();
     let key = crypto::generate_file_key(mnemonic, bucket, &index)?;
     let pb = pb.unwrap_or_else(noop_sink);
-    upload_single(net, bucket, size, reader, &key, &iv, &index, &pb).await
+    if size > MULTIPART_THRESHOLD {
+        upload_multipart(net, bucket, size, reader, &key, &iv, &index, &pb).await
+    } else {
+        upload_single(net, bucket, size, reader, &key, &iv, &index, &pb).await
+    }
 }
 
 /// Single presigned-URL upload, body streamed straight from a reader through CTR.
@@ -154,18 +161,22 @@ where
 }
 
 /// Multipart upload: continuous CTR stream sliced into 15MB parts, PUT concurrently.
-#[cfg(feature = "fs")]
+/// Generic over any sequential reader — it reads forward once and buffers each
+/// part before dispatching, so it doesn't need the source to be seekable.
 #[allow(clippy::too_many_arguments)]
-async fn upload_multipart(
+async fn upload_multipart<R>(
     net: &NetworkApi,
     bucket: &str,
     size: u64,
-    path: &Path,
+    mut reader: R,
     key: &[u8; 32],
     iv: &[u8],
     index: &[u8],
     pb: &Arc<dyn ProgressSink>,
-) -> Result<String> {
+) -> Result<String>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
     let num_parts = size.div_ceil(PART_SIZE as u64) as u32;
     let start = net.start_upload(bucket, size, num_parts).await?;
     let slot = start
@@ -180,7 +191,6 @@ async fn upload_multipart(
 
     let mut hasher = Sha256::new();
     let mut ctr = Ctr::new(key, iv);
-    let mut file = tokio::fs::File::open(path).await?;
 
     let sem = Arc::new(tokio::sync::Semaphore::new(UPLOAD_CONCURRENCY));
     let mut handles = Vec::new();
@@ -189,7 +199,7 @@ async fn upload_multipart(
     let mut read_buf = vec![0u8; READ_CHUNK];
 
     loop {
-        let n = file.read(&mut read_buf).await?;
+        let n = reader.read(&mut read_buf).await?;
         if n == 0 {
             break;
         }
@@ -249,7 +259,6 @@ async fn upload_multipart(
     Ok(finish.id)
 }
 
-#[cfg(feature = "fs")]
 async fn dispatch_part(
     net: &NetworkApi,
     urls: &[String],
@@ -645,5 +654,182 @@ mod tests {
             .unwrap();
         unsafe { std::env::remove_var("DRIVE_NEW_API_URL") };
         assert_eq!(result, Some("brand-new-uuid".to_string()));
+    }
+
+    /// An in-memory, non-seekable `AsyncRead` — stands in for a live WebDAV/FUSE
+    /// write body, which (unlike a file) can only be read forward once.
+    struct SliceReader {
+        data: Vec<u8>,
+        pos: usize,
+    }
+
+    impl AsyncRead for SliceReader {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let remaining = &self.data[self.pos..];
+            let n = remaining.len().min(buf.remaining());
+            buf.put_slice(&remaining[..n]);
+            self.pos += n;
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Unlike `mock_server` (fixed sequential responses — one connection per list
+    /// entry), multipart dispatches several part PUTs concurrently, so this routes
+    /// by method+path instead of connection order: `POST .../start` and
+    /// `POST .../finish` return canned JSON, `PUT /partN` records the body length
+    /// it received and returns a fake ETag.
+    #[allow(clippy::type_complexity)]
+    fn mock_network_server() -> (
+        String,
+        Arc<Mutex<Vec<(u32, usize)>>>,
+        Arc<Mutex<String>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let parts: Arc<Mutex<Vec<(u32, usize)>>> = Arc::new(Mutex::new(Vec::new()));
+        let start_query: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let (parts2, start_query2) = (parts.clone(), start_query.clone());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let (parts, start_query) = (parts2.clone(), start_query2.clone());
+                std::thread::spawn(move || handle_network_conn(&mut stream, &parts, &start_query));
+            }
+        });
+        (base, parts, start_query)
+    }
+
+    fn handle_network_conn(
+        stream: &mut std::net::TcpStream,
+        parts: &Arc<Mutex<Vec<(u32, usize)>>>,
+        start_query: &Arc<Mutex<String>>,
+    ) {
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_millis(2000)))
+            .ok();
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 8192];
+        let (method, path, body) = loop {
+            match stream.read(&mut chunk) {
+                Ok(0) => return,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    let Some(pos) = find_subslice(&buf, b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let header_str = String::from_utf8_lossy(&buf[..pos]).to_string();
+                    let mut req_line = header_str.lines().next().unwrap_or("").split_whitespace();
+                    let method = req_line.next().unwrap_or("").to_string();
+                    let path = req_line.next().unwrap_or("").to_string();
+                    let cl: usize = header_str
+                        .lines()
+                        .find_map(|l| {
+                            let lower = l.to_lowercase();
+                            lower.strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    while buf.len() < pos + 4 + cl {
+                        match stream.read(&mut chunk) {
+                            Ok(0) => break,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                            Err(_) => break,
+                        }
+                    }
+                    let body = buf[pos + 4..(pos + 4 + cl).min(buf.len())].to_vec();
+                    break (method, path, body);
+                }
+                Err(_) => return,
+            }
+        };
+
+        if method == "POST" && path.starts_with("/v2/buckets/") && path.contains("/files/start") {
+            if let Some(q) = path.split('?').nth(1) {
+                *start_query.lock().unwrap() = q.to_string();
+            }
+            let base = format!(
+                "http://{}",
+                stream.local_addr().map(|a| a.to_string()).unwrap_or_default()
+            );
+            let json = format!(
+                r#"{{"uploads":[{{"uuid":"test-uuid","urls":["{base}/part1","{base}/part2"],"UploadId":"UPLOADID"}}]}}"#
+            );
+            write_response(stream, 200, "OK", "application/json", &json, &[]);
+        } else if method == "PUT" && path.starts_with("/part") {
+            let n: u32 = path.trim_start_matches("/part").parse().unwrap_or(0);
+            parts.lock().unwrap().push((n, body.len()));
+            let etag = format!("ETag: \"etag-{n}\"\r\n");
+            write_response(stream, 200, "OK", "application/octet-stream", "", &[&etag]);
+        } else if method == "POST" && path.contains("/files/finish") {
+            write_response(
+                stream,
+                200,
+                "OK",
+                "application/json",
+                r#"{"id":"finished-id"}"#,
+                &[],
+            );
+        } else {
+            write_response(stream, 404, "Not Found", "text/plain", "", &[]);
+        }
+    }
+
+    fn write_response(
+        stream: &mut std::net::TcpStream,
+        status: u16,
+        reason: &str,
+        content_type: &str,
+        body: &str,
+        extra_headers: &[&str],
+    ) {
+        let extra: String = extra_headers.concat();
+        let resp = format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n{extra}\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(resp.as_bytes());
+        let _ = stream.flush();
+    }
+
+    /// Regression test for the fix: `upload_stream_to_network`'s underlying
+    /// multipart path used to be file-only (`upload_multipart` took `&Path`).
+    /// Feeding it a plain in-memory, non-seekable reader over a body larger than
+    /// one 15MB part must still slice it into multiple parts and PUT them
+    /// individually, instead of requiring a seekable file source.
+    #[tokio::test]
+    async fn generic_reader_multipart_splits_into_parts() {
+        let _guard = ENV_LOCK.lock().await;
+        let (base, parts, start_query) = mock_network_server();
+        unsafe { std::env::set_var("NETWORK_URL", &base) };
+
+        let size = PART_SIZE + 5 * 1024 * 1024; // 20MB: 15MB + 5MB => 2 parts
+        let data = vec![0xABu8; size];
+        let reader = SliceReader { data, pos: 0 };
+
+        let net = NetworkApi::new("bridge-user", "user-id");
+        let key = [0u8; 32];
+        let iv = vec![0u8; 16];
+        let index = vec![0u8; 32];
+        let pb = noop_sink();
+
+        let result = upload_multipart(&net, "bucket", size as u64, reader, &key, &iv, &index, &pb)
+            .await
+            .unwrap();
+
+        unsafe { std::env::remove_var("NETWORK_URL") };
+
+        assert_eq!(result, "finished-id");
+        let recorded = parts.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 2, "expected 2 parts, got {recorded:?}");
+        let total: usize = recorded.iter().map(|(_, len)| *len).sum();
+        assert_eq!(total, size);
+        assert!(
+            start_query.lock().unwrap().contains("multiparts=2"),
+            "start-upload query was {:?}",
+            start_query.lock().unwrap()
+        );
     }
 }
