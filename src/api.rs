@@ -97,6 +97,13 @@ impl DriveApi {
         format!("{}{}", self.base, path)
     }
 
+    /// `true` when this client is scoped to an active workspace. Backups have
+    /// no workspace-scoped variant, so callers use this to skip/reject
+    /// backup-device lookups while a workspace is active.
+    pub fn is_workspace(&self) -> bool {
+        self.workspace.is_some()
+    }
+
     /// Authenticated headers, including `x-internxt-workspace` when a workspace
     /// is active (mirrors node SdkManager.init with a workspaceToken).
     fn auth_headers(&self, token: &str) -> Result<HeaderMap> {
@@ -667,6 +674,68 @@ impl DriveApi {
             .send()
             .await?;
         Self::check(resp, "deleteFolder").await?;
+        Ok(())
+    }
+
+    // ---- backups ----
+    //
+    // The desktop app represents each backed-up device as a special Drive
+    // folder ("device as folder"): `GET /backup/deviceAsFolder` lists them,
+    // and browsing/downloading what's backed up is just ordinary folder
+    // listing/download against that folder's uuid — no dedicated endpoints or
+    // client-side decryption needed beyond what folders already require
+    // (names are stored server-side plaintext, like other Drive folders).
+    // Personal-account only: backups have no workspace-scoped variant.
+
+    /// GET /backup/deviceAsFolder — list backup devices (each a Drive folder).
+    pub async fn get_backup_devices(&self, token: &str) -> Result<Value> {
+        let resp = self
+            .client
+            .get(self.url("/backup/deviceAsFolder"))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        Self::check(resp, "getBackupDevices").await
+    }
+
+    /// POST /backup/deviceAsFolder — create a backup device (a new Drive
+    /// folder registered as a device). Lets a headless/scripted `ixr` upload
+    /// register itself as a backup device without the desktop app.
+    pub async fn create_backup_device(&self, token: &str, name: &str) -> Result<Value> {
+        let resp = self
+            .client
+            .post(self.url("/backup/deviceAsFolder"))
+            .headers(self.auth_headers(token)?)
+            .json(&json!({ "deviceName": name }))
+            .send()
+            .await?;
+        Self::check(resp, "createBackupDevice").await
+    }
+
+    /// PATCH /backup/deviceAsFolder/{uuid} — rename a backup device.
+    pub async fn rename_backup_device(&self, token: &str, uuid: &str, name: &str) -> Result<Value> {
+        let resp = self
+            .client
+            .patch(self.url(&format!("/backup/deviceAsFolder/{uuid}")))
+            .headers(self.auth_headers(token)?)
+            .json(&json!({ "deviceName": name }))
+            .send()
+            .await?;
+        Self::check(resp, "renameBackupDevice").await
+    }
+
+    /// DELETE /backup/deviceAsFolder/{uuid} — delete a backup device and
+    /// everything backed up to it. Same call the desktop app's own "delete
+    /// device" action makes; unlike Drive files/folders, backups have no
+    /// trash to recover from, so this is effectively permanent.
+    pub async fn delete_backup_device(&self, token: &str, uuid: &str) -> Result<()> {
+        let resp = self
+            .client
+            .delete(self.url(&format!("/backup/deviceAsFolder/{uuid}")))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        Self::check(resp, "deleteBackupDevice").await?;
         Ok(())
     }
 }
