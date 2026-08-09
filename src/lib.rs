@@ -23,6 +23,8 @@ pub mod sso;
 #[cfg(feature = "thumbnails")]
 pub mod thumbnail;
 pub mod transfer;
+#[cfg(feature = "vpn")]
+pub mod vpn;
 
 pub use models::Credentials;
 pub use progress::ProgressSink;

@@ -37,6 +37,39 @@ pub fn desktop_header() -> String {
     get("DESKTOP_HEADER", "3b68706a367fd567b929396290b1de40768bb768")
 }
 
+/// VPN API base (locations list, anonymous token). Not in og/cli's
+/// .env.template — no official CLI ports this, and og/vpn's `.env.example`
+/// ships blank with no fallback in source. Confirmed live by probing:
+/// `GET https://vpn.internxt.com/users/anonymous/token` returns 200 with a
+/// real token.
+#[cfg(feature = "vpn")]
+pub fn vpn_api_url() -> String {
+    get("VPN_API_URL", "https://vpn.internxt.com")
+}
+
+/// VPN proxy server (gost) host. A **plain, unencrypted** HTTP CONNECT
+/// proxy (`scheme: "http"`, not https) — one endpoint for every location;
+/// the location is selected via the Proxy-Authorization *username* (see
+/// `vpn::proxy_credentials`), not by connecting to a different host.
+///
+/// og/vpn's own source (`.env.example`, k8s manifests) is stale: it names a
+/// TLS-fronted `dihgihw.internxt.com:8083` that no longer resolves. This
+/// value instead comes from decompiling the *installed* Chrome extension
+/// (`chunks/popup-*.js`, `gs={HOST:"162.19.68.243",PORT:8082}` feeding a
+/// `scheme:"http"` `chrome.proxy.settings` rule) and was confirmed live:
+/// `curl -x http://162.19.68.243:8082 https://example.com -U
+/// "FR:<anonymous-token>"` tunnels successfully.
+#[cfg(feature = "vpn")]
+pub fn vpn_proxy_host() -> String {
+    get("VPN_PROXY_HOST", "162.19.68.243")
+}
+
+/// VPN proxy server port. See [`vpn_proxy_host`] for how this was found.
+#[cfg(feature = "vpn")]
+pub fn vpn_proxy_port() -> u16 {
+    get("VPN_PROXY_PORT", "8082").parse().unwrap_or(8082)
+}
+
 /// Whether image thumbnail generation/upload is enabled (default on). Set
 /// `IXR_THUMBNAILS` to `0`/`false`/`no`/`off` (case-insensitive) to turn it
 /// off across every upload path (upload-file/-folder and the serve backends).

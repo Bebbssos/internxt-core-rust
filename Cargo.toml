@@ -27,6 +27,11 @@ fs = []
 # PNG preview via the `image` crate. Mirrors og's sharp-based ThumbnailService.
 # Pulls in `image`; disable for a smaller build without preview upload.
 thumbnails = ["dep:image"]
+# Internxt VPN: proxy-server connection details + the locations/token API
+# (`vpn` module). No official CLI ports this — it otherwise only ships as a
+# browser extension. No extra deps: reuses the reqwest client already
+# unconditionally present.
+vpn = []
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
