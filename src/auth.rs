@@ -222,11 +222,9 @@ pub async fn refresh_credentials(
     on_warn: impl Fn(&str),
 ) -> Result<(Credentials, bool)> {
     let (exp, iat) = jwt_claims(&creds.token)
-        .ok_or_else(|| anyhow!("Stored credentials are invalid. Run `internxt login` again."))?;
+        .ok_or_else(|| anyhow!("Stored credentials are invalid."))?;
     if !crypto::validate_mnemonic(&creds.user.mnemonic) {
-        return Err(anyhow!(
-            "Stored credentials are invalid. Run `internxt login` again."
-        ));
+        return Err(anyhow!("Stored credentials are invalid."));
     }
 
     let now = std::time::SystemTime::now()
@@ -235,9 +233,7 @@ pub async fn refresh_credentials(
         .unwrap_or(0);
 
     if exp - now <= 0 {
-        return Err(anyhow!(
-            "Your session has expired. Run `internxt login` again."
-        ));
+        return Err(anyhow!("Your session has expired."));
     }
 
     let mut changed = false;
@@ -284,9 +280,7 @@ pub async fn refresh_credentials(
                 }
                 Ok(None) => {
                     if ws_expired {
-                        return Err(anyhow!(
-                            "Your workspace session has expired. Run `internxt login` again."
-                        ));
+                        return Err(anyhow!("Your workspace session has expired."));
                     }
                 }
                 Err(e) => {
