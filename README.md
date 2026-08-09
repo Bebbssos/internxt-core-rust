@@ -2,6 +2,8 @@
 
 Unofficial Rust engine for [Internxt Drive](https://internxt.com): authentication,
 end-to-end crypto, the Drive REST API, and fully streaming network transfers.
+Also covers the Internxt VPN (locations + proxy credentials, `vpn` feature,
+off by default) — see [Features](#features).
 
 > Not affiliated with or endorsed by Internxt.
 
@@ -28,6 +30,15 @@ between `0.x` releases.
   `upload_stream_to_network` / `download_file_to_writer`).
 - `thumbnails` *(default)* — image thumbnail generation (decode/resize/encode a
   300×300 PNG preview). Pulls in `image`.
+- `vpn` *(off)* — the Internxt VPN's locations/anonymous-token API
+  (`vpn::VpnApi`) and the shared proxy server's connection details
+  (`vpn::proxy_server`, `vpn::proxy_credentials`; a plain, not TLS-wrapped,
+  HTTP CONNECT proxy). No extra deps — reuses the `reqwest` client already
+  unconditionally present. There's no official CLI to mirror here — the VPN
+  otherwise only ships as a browser extension. The actual local
+  listener/relay that speaks to this proxy is a front-end concern (see
+  `internxt-cli-rust`'s `vpn locations`/`vpn proxy`), not part of this
+  crate.
 
 ## Crypto compatibility
 
