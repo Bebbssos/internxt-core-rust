@@ -386,6 +386,52 @@ impl DriveApi {
         Ok(serde_json::from_value(v)?)
     }
 
+    /// Replace a file's content, tolerating the zero-byte case.
+    ///
+    /// A zero-byte file has no network object behind it — nothing is uploaded,
+    /// so its `fileId` is the empty string. `POST /files` accepts that happily
+    /// (creating an empty file works), but `PUT /files/{uuid}` answers an empty
+    /// `fileId` with a 500, so truncating an existing Drive file to zero bytes
+    /// can never go through `replace_file`. Fall back to trash-then-create for
+    /// that one case: the old entry is trashed (recoverable, not permanently
+    /// deleted) and a fresh empty entry takes over its name.
+    ///
+    /// Note the uuid is NOT preserved on that path — the returned
+    /// `DriveFileData` carries the new one, so callers holding a per-file uuid
+    /// must adopt it instead of reusing what they passed in.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn replace_file_or_recreate(
+        &self,
+        token: &str,
+        uuid: &str,
+        file_id: &str,
+        size: u64,
+        plain_name: &str,
+        file_type: &str,
+        folder_uuid: &str,
+        bucket: &str,
+        creation_time: &str,
+        modification_time: &str,
+    ) -> Result<DriveFileData> {
+        if !file_id.is_empty() {
+            return self.replace_file(token, uuid, file_id, size).await;
+        }
+        self.trash_items(token, json!([{ "uuid": uuid, "type": "file" }]))
+            .await?;
+        self.create_file_entry(
+            token,
+            plain_name,
+            file_type,
+            size,
+            folder_uuid,
+            file_id,
+            bucket,
+            creation_time,
+            modification_time,
+        )
+        .await
+    }
+
     /// POST /files/thumbnail — register a thumbnail for a file (mirrors og
     /// storage.createThumbnailEntryWithUUID). The thumbnail bytes must already be
     /// uploaded to the network; `bucket_file` is that network file id.
