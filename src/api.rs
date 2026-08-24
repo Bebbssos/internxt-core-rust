@@ -396,6 +396,12 @@ impl DriveApi {
     /// that one case: the old entry is trashed (recoverable, not permanently
     /// deleted) and a fresh empty entry takes over its name.
     ///
+    /// If that create fails the trash is rolled back — some plans reject
+    /// empty-file creation outright (HTTP 402), and without the rollback such
+    /// an account would see a truncate leave its file in the trash instead of
+    /// in place. Restoring is just a move back to the parent folder, the same
+    /// thing an explicit "restore from trash" does.
+    ///
     /// Note the uuid is NOT preserved on that path — the returned
     /// `DriveFileData` carries the new one, so callers holding a per-file uuid
     /// must adopt it instead of reusing what they passed in.
@@ -418,18 +424,31 @@ impl DriveApi {
         }
         self.trash_items(token, json!([{ "uuid": uuid, "type": "file" }]))
             .await?;
-        self.create_file_entry(
-            token,
-            plain_name,
-            file_type,
-            size,
-            folder_uuid,
-            file_id,
-            bucket,
-            creation_time,
-            modification_time,
-        )
-        .await
+        let created = self
+            .create_file_entry(
+                token,
+                plain_name,
+                file_type,
+                size,
+                folder_uuid,
+                file_id,
+                bucket,
+                creation_time,
+                modification_time,
+            )
+            .await;
+        match created {
+            Ok(created) => Ok(created),
+            Err(e) => match self.move_file(token, uuid, folder_uuid).await {
+                Ok(_) => Err(e.context(
+                    "could not create the empty file; the original was restored from the trash",
+                )),
+                Err(restore) => Err(e.context(format!(
+                    "could not create the empty file, and restoring the original from the trash \
+                     also failed ({restore:#}) — it is still in the trash"
+                ))),
+            },
+        }
     }
 
     /// POST /files/thumbnail — register a thumbnail for a file (mirrors og
