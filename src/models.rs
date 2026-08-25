@@ -169,6 +169,11 @@ pub struct DriveFileData {
     pub name: Option<String>,
     #[serde(rename = "type", default)]
     pub file_type: Option<String>,
+    /// Whether the caller has this file marked as a favorite. Added to the
+    /// backend DTOs alongside the favorites API (og sdk 1.20.x); absent from
+    /// older responses, where it decodes as `false`.
+    #[serde(rename = "isFavorite", default)]
+    pub is_favorite: bool,
 }
 
 /// A thumbnail as returned inside a folder-content file listing (`files[].thumbnails[]`
@@ -417,6 +422,66 @@ impl FolderTree {
     pub fn total_folders(&self) -> usize {
         self.children.len() + self.children.iter().map(|c| c.total_folders()).sum::<usize>()
     }
+}
+
+/// One hit from the fuzzy global search (`POST /fuzzy/{search}`, og
+/// `storageClient.getGlobalSearchItems`).
+///
+/// `item_type` is `"file"` or `"folder"` and `item_id` is that item's uuid —
+/// the handle to follow up with [`crate::api::DriveApi::get_file_meta`] or
+/// `get_folder_meta`. The search index carries only enough of the record to
+/// rank and label a hit, so `item` (the partial record: bucket, fileId, size,
+/// type) is kept as raw JSON and may be absent entirely.
+#[derive(Deserialize, Debug, Clone)]
+pub struct SearchResult {
+    pub id: String,
+    #[serde(rename = "itemId")]
+    pub item_id: String,
+    /// `"file"` or `"folder"`.
+    #[serde(rename = "itemType")]
+    pub item_type: String,
+    /// Plain (decrypted) item name, as indexed.
+    pub name: String,
+    /// Postgres full-text rank. Null for a hit found only by trigram
+    /// similarity, so this is an `Option`, unlike og's type.
+    #[serde(default)]
+    pub rank: Option<f64>,
+    /// Trigram similarity of `name` against the query, 0.0..=1.0.
+    #[serde(default)]
+    pub similarity: f64,
+    /// The partial item record the backend attaches to a hit, when it does.
+    #[serde(default)]
+    pub item: Option<serde_json::Value>,
+}
+
+/// Optional filters for [`crate::api::DriveApi::global_search`], sent as the
+/// JSON body of `POST /fuzzy/{search}`.
+///
+/// og moved this endpoint from `GET .../fuzzy/{search}?offset=N` to a POST with
+/// this body in sdk 1.20.x, which is also where the filters below appeared.
+/// Every field is optional and they combine with AND (within `types`, the
+/// extensions combine with OR).
+#[derive(Serialize, Debug, Clone, Default)]
+pub struct SearchFilters {
+    /// Pagination offset. The page size is the backend's, not ours to set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u32>,
+    /// File extensions without the dot (`["jpg", "pdf"]`), plus the reserved
+    /// value `"folder"` to include folders in the results.
+    #[serde(rename = "type", skip_serializing_if = "Vec::is_empty")]
+    pub types: Vec<String>,
+    /// Smallest file size to return, in bytes. Excludes folders when set.
+    #[serde(rename = "minSize", skip_serializing_if = "Option::is_none")]
+    pub min_size: Option<u64>,
+    /// Largest file size to return, in bytes. Excludes folders when set.
+    #[serde(rename = "maxSize", skip_serializing_if = "Option::is_none")]
+    pub max_size: Option<u64>,
+    /// ISO 8601 timestamp; only items modified after it are returned.
+    #[serde(rename = "modifiedAfter", skip_serializing_if = "Option::is_none")]
+    pub modified_after: Option<String>,
+    /// ISO 8601 timestamp; only items modified before it are returned.
+    #[serde(rename = "modifiedBefore", skip_serializing_if = "Option::is_none")]
+    pub modified_before: Option<String>,
 }
 
 /// A role a shared item's recipient can hold (`GET /sharings/roles`).
