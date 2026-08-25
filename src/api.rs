@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 use crate::config;
-use crate::models::{Credentials, DriveFileData, FolderPathMeta, UserPublicKeyResponse};
+use crate::models::{Credentials, DriveFileData, FileLimits, FolderPathMeta, UserPublicKeyResponse};
 
 /// Connecting to a reachable API host should be fast; anything slower almost
 /// certainly means a dead peer or a firewalled black hole rather than a slow
@@ -250,10 +250,18 @@ impl DriveApi {
         Ok(v.get("maxSpaceBytes").and_then(|m| m.as_u64()).unwrap_or(0))
     }
 
-    /// GET /files/limits -> the plan's `maxUploadFileSize` in bytes, or `None`
-    /// when the plan sets no per-file cap (field null/absent). Mirrors og
+    /// GET /files/limits -> the plan's file limits: the per-upload size cap and
+    /// the versioning entitlement. Mirrors og
     /// `storageClient.getFileVersionLimits()`.
-    pub async fn get_file_limits(&self, token: &str) -> Result<Option<u64>> {
+    ///
+    /// og's node CLI reads only `maxUploadFileSize` from this (to reject an
+    /// oversized upload before spending bandwidth on it); the versioning block
+    /// is what drive-web gates its version-history UI on.
+    ///
+    /// There is no separate size-precheck endpoint to pair with this: og's SDK
+    /// declares `POST /files/check-size-limit`, but it answers 404 on the live
+    /// API, so this is the only way to learn the cap.
+    pub async fn get_file_limits(&self, token: &str) -> Result<FileLimits> {
         let resp = self
             .client
             .get(self.url("/files/limits"))
@@ -261,7 +269,7 @@ impl DriveApi {
             .send()
             .await?;
         let v = Self::check(resp, "getFileLimits").await?;
-        Ok(v.get("maxUploadFileSize").and_then(|m| m.as_u64()))
+        Ok(serde_json::from_value(v)?)
     }
 
     /// GET {payments}/products/tier -> the plan's human `label` (e.g. "Pro").
