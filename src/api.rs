@@ -605,6 +605,119 @@ impl DriveApi {
         Self::check(resp, "getWorkspaceCredentials").await
     }
 
+    // ---- Workspace administration ----
+    //
+    // These read the membership/quota side of a workspace, as opposed to the
+    // credentials the transfer paths need. All of them hand back raw [`Value`]
+    // rather than typed structs, on purpose: the account available for probing
+    // belongs to **no workspace at all** (`GET /workspaces/` answers
+    // `{"availableWorkspaces": [], "pendingWorkspaces": []}`), so every response
+    // observed was an empty list. Typing them would mean transcribing og's
+    // OpenAPI schema and presenting a guess as a contract. Raw values keep the
+    // uncertainty visible, and match how the other workspace and folder reads
+    // here already behave.
+    //
+    // Verified only in the sense that the routes exist and answer 200 with an
+    // empty body: `/workspaces/`, `/workspaces/pending-setup` and
+    // `/workspaces/invitations`. The `{workspace_id}`-scoped calls below could
+    // not be reached at all. Anyone with a populated workspace should re-probe
+    // and promote these to real types.
+
+    /// GET /workspaces/{id} -> a single workspace's details.
+    /// Unverified — see the note above.
+    pub async fn get_workspace(&self, token: &str, workspace_id: &str) -> Result<Value> {
+        let resp = self
+            .client
+            .get(self.url(&format!("/workspaces/{workspace_id}")))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        Self::check(resp, "getWorkspace").await
+    }
+
+    /// GET /workspaces/{id}/members -> the workspace's members.
+    /// Unverified — see the note above.
+    pub async fn get_workspace_members(&self, token: &str, workspace_id: &str) -> Result<Value> {
+        let resp = self
+            .client
+            .get(self.url(&format!("/workspaces/{workspace_id}/members")))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        Self::check(resp, "getWorkspaceMembers").await
+    }
+
+    /// GET /workspaces/{id}/teams -> the workspace's teams.
+    /// Unverified — see the note above.
+    pub async fn get_workspace_teams(&self, token: &str, workspace_id: &str) -> Result<Value> {
+        let resp = self
+            .client
+            .get(self.url(&format!("/workspaces/{workspace_id}/teams")))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        Self::check(resp, "getWorkspaceTeams").await
+    }
+
+    /// GET /workspaces/{id}/usage -> the workspace's overall space usage.
+    /// Unverified — see the note above.
+    pub async fn get_workspace_usage(&self, token: &str, workspace_id: &str) -> Result<Value> {
+        let resp = self
+            .client
+            .get(self.url(&format!("/workspaces/{workspace_id}/usage")))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        Self::check(resp, "getWorkspaceUsage").await
+    }
+
+    /// GET /workspaces/{id}/usage/member -> the calling member's own usage
+    /// within the workspace. Unverified — see the note above.
+    pub async fn get_workspace_member_usage(
+        &self,
+        token: &str,
+        workspace_id: &str,
+    ) -> Result<Value> {
+        let resp = self
+            .client
+            .get(self.url(&format!("/workspaces/{workspace_id}/usage/member")))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        Self::check(resp, "getWorkspaceMemberUsage").await
+    }
+
+    /// GET /workspaces/pending-setup -> workspaces the caller owns that still
+    /// need setting up. Answers `200 []` on an account with no workspaces.
+    pub async fn get_pending_setup_workspaces(&self, token: &str) -> Result<Value> {
+        let resp = self
+            .client
+            .get(self.url("/workspaces/pending-setup"))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        Self::check(resp, "getPendingSetupWorkspaces").await
+    }
+
+    /// GET /workspaces/invitations -> workspace invitations awaiting the
+    /// caller's response. Answers `200 []` on an account with none.
+    pub async fn get_workspace_invitations(
+        &self,
+        token: &str,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Value> {
+        let resp = self
+            .client
+            .get(self.url(&format!(
+                "/workspaces/invitations?limit={limit}&offset={offset}"
+            )))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        Self::check(resp, "getWorkspaceInvitations").await
+    }
+
     /// GET /auth/logout (best effort; invalidates the session token server-side).
     pub async fn logout(&self, token: &str) -> Result<()> {
         let resp = self
