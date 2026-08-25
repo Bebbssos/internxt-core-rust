@@ -573,6 +573,40 @@ impl DriveApi {
             .unwrap_or_default())
     }
 
+    /// GET /files/recents?limit=N -> the account's most recently modified
+    /// files, newest first, across every folder. Mirrors og
+    /// `storageClient.getRecentFiles`.
+    ///
+    /// Entries carry `folderUuid`, so a caller can resolve where each file
+    /// lives; [`DriveFileData`] keeps only the fields core needs, so reach for
+    /// [`Self::get_file_meta_value`] if the raw record is wanted.
+    pub async fn get_recent_files(&self, token: &str, limit: u32) -> Result<Vec<DriveFileData>> {
+        let resp = self
+            .client
+            .get(self.url(&format!("/files/recents?limit={limit}")))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        let v = Self::check(resp, "getRecentFiles").await?;
+        Ok(serde_json::from_value(v)?)
+    }
+
+    /// GET /users/me/upload-status -> whether the account has ever uploaded a
+    /// file. Mirrors og `storageClient.hasUploadedFiles`, which drive-web uses
+    /// to tell a genuinely empty account from a still-loading one.
+    pub async fn has_uploaded_files(&self, token: &str) -> Result<bool> {
+        let resp = self
+            .client
+            .get(self.url("/users/me/upload-status"))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        let v = Self::check(resp, "hasUploadedFiles").await?;
+        Ok(v.get("hasUploadedFiles")
+            .and_then(|h| h.as_bool())
+            .unwrap_or(false))
+    }
+
     /// GET folder ancestors — the chain from the folder itself (first element) up
     /// to the account/workspace root (last element, `parentUuid: null`). Each entry
     /// carries `uuid`/`plainName`/`parentUuid`. Workspace-aware
