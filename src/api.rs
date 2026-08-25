@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 use crate::config;
-use crate::models::{Credentials, DriveFileData, FileLimits, FileVersion, FolderPathMeta, FolderStats, FolderTree, SharingRole, UserPublicKeyResponse};
+use crate::models::{Credentials, DriveFileData, FileLimits, FileVersion, FolderPathMeta, FolderStats, FolderTree, SearchFilters, SearchResult, SharingRole, UserPublicKeyResponse};
 
 /// Connecting to a reachable API host should be fast; anything slower almost
 /// certainly means a dead peer or a firewalled black hole rather than a slow
@@ -61,6 +61,15 @@ fn base_headers() -> HeaderMap {
         h.insert("x-internxt-desktop-header", v);
     }
     h
+}
+
+/// Percent-encode a single URL path segment, `/` included.
+///
+/// Unlike [`encode_path`], nothing is kept literal: the value is one segment,
+/// so a `/` inside it (legal in a search term) must not be allowed to split the
+/// path. og interpolates the raw string into the URL and has that bug.
+fn encode_segment(segment: &str) -> String {
+    encode_path(segment).replace('/', "%2F")
 }
 
 /// Percent-encode a Drive path for use in a query string, keeping `/` literal.
@@ -605,6 +614,128 @@ impl DriveApi {
         Ok(v.get("hasUploadedFiles")
             .and_then(|h| h.as_bool())
             .unwrap_or(false))
+    }
+
+    /// POST /fuzzy/{search} -> items whose name fuzzy-matches `query`, ranked
+    /// best first. Mirrors og `storageClient.getGlobalSearchItems`.
+    ///
+    /// og moved this off `GET .../fuzzy/{search}?offset=N` in sdk 1.20.x: the
+    /// parameters now travel as a JSON body ([`SearchFilters`]) so the new
+    /// extension/size/date filters have somewhere to live. Pass
+    /// [`SearchFilters::default()`] for an unfiltered first page.
+    ///
+    /// Workspace-aware: with a workspace active this searches that workspace's
+    /// drive (`/workspaces/{id}/fuzzy/{search}`) rather than the personal one.
+    /// The search term is percent-encoded, so a term containing `/`, `?` or `#`
+    /// can't corrupt the path.
+    pub async fn global_search(
+        &self,
+        token: &str,
+        query: &str,
+        filters: &SearchFilters,
+    ) -> Result<Vec<SearchResult>> {
+        let search = encode_segment(query);
+        let path = match &self.workspace {
+            Some((id, _)) => format!("/workspaces/{id}/fuzzy/{search}"),
+            None => format!("/fuzzy/{search}"),
+        };
+        let resp = self
+            .client
+            .post(self.url(&path))
+            .headers(self.auth_headers(token)?)
+            .json(filters)
+            .send()
+            .await?;
+        let v = Self::check(resp, "globalSearch").await?;
+        let list = v
+            .get("data")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(vec![]));
+        Ok(serde_json::from_value(list)?)
+    }
+
+    /// PUT /favorites/{item_type}/{uuid} -> mark a file or folder as a
+    /// favorite. `item_type` is `"file"` or `"folder"`.
+    ///
+    /// Idempotent: favoriting an already-favorited item succeeds and creates no
+    /// duplicate. Returns the item's resulting favorite state — the endpoint
+    /// answers `{ "favorited": true }`, but is documented as a bodiless 200, so
+    /// an empty response is read as success.
+    pub async fn mark_favorite(&self, token: &str, item_type: &str, uuid: &str) -> Result<bool> {
+        let resp = self
+            .client
+            .put(self.url(&format!("/favorites/{item_type}/{uuid}")))
+            .headers(self.auth_headers(token)?)
+            .json(&json!({}))
+            .send()
+            .await?;
+        let v = Self::check(resp, "markFavorite").await?;
+        Ok(v.get("favorited").and_then(|f| f.as_bool()).unwrap_or(true))
+    }
+
+    /// DELETE /favorites/{item_type}/{uuid} -> drop a file or folder from the
+    /// favorites. Idempotent like [`Self::mark_favorite`]: unfavoriting an item
+    /// that isn't favorited is a successful no-op. Returns the resulting
+    /// favorite state (`false` when the response carries no body).
+    pub async fn unmark_favorite(&self, token: &str, item_type: &str, uuid: &str) -> Result<bool> {
+        let resp = self
+            .client
+            .delete(self.url(&format!("/favorites/{item_type}/{uuid}")))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        let v = Self::check(resp, "unmarkFavorite").await?;
+        Ok(v.get("favorited").and_then(|f| f.as_bool()).unwrap_or(false))
+    }
+
+    /// GET /favorites?type=…&limit=…&offset=… -> one page of the account's
+    /// favorited files *or* folders — the endpoint returns one kind per call,
+    /// chosen by `item_type` (`"file"` or `"folder"`).
+    ///
+    /// `sort` is `uuid`, `plainName` or `updatedAt` and `order` is `ASC` or
+    /// `DESC`; both are optional and left to the backend's default when `None`.
+    /// Records come back raw: folders have no camelCase DTO in core (same
+    /// reasoning as [`Self::check_duplicate_folders`]). For files, prefer the
+    /// typed [`Self::get_favorite_files`].
+    pub async fn get_favorites(
+        &self,
+        token: &str,
+        item_type: &str,
+        limit: u32,
+        offset: u32,
+        sort: Option<&str>,
+        order: Option<&str>,
+    ) -> Result<Vec<Value>> {
+        let mut path = format!("/favorites?type={item_type}&limit={limit}&offset={offset}");
+        if let Some(sort) = sort {
+            path.push_str(&format!("&sort={sort}"));
+        }
+        if let Some(order) = order {
+            path.push_str(&format!("&order={order}"));
+        }
+        let resp = self
+            .client
+            .get(self.url(&path))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        let v = Self::check(resp, "getFavorites").await?;
+        Ok(v.as_array().cloned().unwrap_or_default())
+    }
+
+    /// [`Self::get_favorites`] for files, decoded into [`DriveFileData`] — the
+    /// same shape the folder listings hand back, so a favorites page can feed
+    /// straight into a download.
+    pub async fn get_favorite_files(
+        &self,
+        token: &str,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<DriveFileData>> {
+        let list = self
+            .get_favorites(token, "file", limit, offset, None, None)
+            .await?;
+        Ok(serde_json::from_value(Value::Array(list))?)
     }
 
     /// GET folder ancestors — the chain from the folder itself (first element) up
@@ -1466,7 +1597,8 @@ impl DriveApi {
 
 #[cfg(test)]
 mod tests {
-    use super::encode_path;
+    use super::{encode_path, encode_segment};
+    use crate::models::{SearchFilters, SearchResult};
 
     #[test]
     fn encode_path_keeps_separators_and_unreserved() {
@@ -1496,5 +1628,49 @@ mod tests {
     #[test]
     fn encode_path_escapes_non_ascii_as_utf8_bytes() {
         assert_eq!(encode_path("/café"), "/caf%C3%A9");
+    }
+
+    #[test]
+    fn encode_segment_escapes_slashes_too() {
+        // A search term is one path segment: a `/` in it must not split the URL.
+        assert_eq!(encode_segment("a/b"), "a%2Fb");
+        assert_eq!(encode_segment("q1 report?"), "q1%20report%3F");
+    }
+
+    #[test]
+    fn search_filters_omit_unset_fields() {
+        let empty = serde_json::to_value(SearchFilters::default()).unwrap();
+        assert_eq!(empty, serde_json::json!({}));
+
+        let filters = SearchFilters {
+            offset: Some(20),
+            types: vec!["jpg".into(), "folder".into()],
+            max_size: Some(1073741824),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(filters).unwrap(),
+            serde_json::json!({
+                "offset": 20,
+                "type": ["jpg", "folder"],
+                "maxSize": 1073741824u64,
+            })
+        );
+    }
+
+    #[test]
+    fn search_result_tolerates_null_rank_and_missing_item() {
+        let hit: SearchResult = serde_json::from_value(serde_json::json!({
+            "id": "1",
+            "itemId": "9c3f-…",
+            "itemType": "folder",
+            "name": "Invoices",
+            "rank": null,
+            "similarity": 0.42,
+        }))
+        .unwrap();
+        assert_eq!(hit.rank, None);
+        assert!(hit.item.is_none());
+        assert_eq!(hit.item_type, "folder");
     }
 }
