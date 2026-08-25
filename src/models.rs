@@ -264,3 +264,29 @@ pub struct FolderPathMeta {
     #[serde(default)]
     pub modification_time: Option<String>,
 }
+
+/// Another user's public keys (`GET /users/public-key/{email}`).
+///
+/// Needed to encrypt something *to* that user — the sharing-invite flow wraps
+/// the item key to the recipient's key. Two are returned: the OpenPGP `ecc` key
+/// every account has, and the post-quantum `kyber` key that hybrid accounts add.
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct UserPublicKeys {
+    /// base64 of the armored OpenPGP public key.
+    #[serde(default)]
+    pub ecc: Option<String>,
+    /// base64 of the raw Kyber public key. Absent for ecc-only accounts.
+    #[serde(default)]
+    pub kyber: Option<String>,
+}
+
+/// Response of `GET /users/public-key/{email}`.
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct UserPublicKeyResponse {
+    /// The ecc key repeated at the top level, for older clients that predate
+    /// the hybrid `keys` object. Same value as `keys.ecc`.
+    #[serde(rename = "publicKey", default)]
+    pub public_key: Option<String>,
+    #[serde(default)]
+    pub keys: UserPublicKeys,
+}
