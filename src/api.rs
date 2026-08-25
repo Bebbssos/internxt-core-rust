@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 use crate::config;
-use crate::models::{Credentials, DriveFileData, FileLimits, FileVersion, FolderPathMeta, UserPublicKeyResponse};
+use crate::models::{Credentials, DriveFileData, FileLimits, FileVersion, FolderPathMeta, FolderStats, FolderTree, UserPublicKeyResponse};
 
 /// Connecting to a reachable API host should be fast; anything slower almost
 /// certainly means a dead peer or a firewalled black hole rather than a slow
@@ -461,6 +461,116 @@ impl DriveApi {
             .await?;
         let v = Self::check(resp, "restoreFileVersion").await?;
         Ok(serde_json::from_value(v)?)
+    }
+
+    /// GET /folders/{uuid}/tree -> the folder's entire subtree (files plus
+    /// recursively nested subfolders) in one request. Mirrors og
+    /// `storageClient.getFolderTree`.
+    ///
+    /// This replaces a breadth-first walk that costs one paginated listing per
+    /// folder — worth a lot for whole-tree work like sync or compare.
+    ///
+    /// **Only safe for bounded subtrees.** The backend builds the whole tree
+    /// eagerly and gives up on big ones: verified working on a 31-file folder
+    /// (nesting confirmed several levels deep), but the same call against a
+    /// ~1000-file, 37 GB account root answered **HTTP 520** — an upstream
+    /// failure, not a normal error body. Callers must be ready to fall back to
+    /// paginated listing, and shouldn't reach for this on an arbitrary folder.
+    /// [`Self::get_folder_stats`] is a cheap way to gauge size beforehand.
+    pub async fn get_folder_tree(&self, token: &str, uuid: &str) -> Result<FolderTree> {
+        let resp = self
+            .client
+            .get(self.url(&format!("/folders/{uuid}/tree")))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        let v = Self::check(resp, "getFolderTree").await?;
+        // The subtree is wrapped: `{ "tree": { ... } }`.
+        let tree = v
+            .get("tree")
+            .cloned()
+            .ok_or_else(|| anyhow!("getFolderTree: no `tree` in response"))?;
+        Ok(serde_json::from_value(tree)?)
+    }
+
+    /// GET /folders/{uuid}/stats -> file count and total size for a subtree.
+    /// Mirrors og `storageClient.getFolderStats`.
+    ///
+    /// Check [`FolderStats::is_file_count_exact`] /
+    /// [`FolderStats::is_total_size_exact`] before presenting the numbers as
+    /// precise — the backend estimates for large folders and clears the flags.
+    pub async fn get_folder_stats(&self, token: &str, uuid: &str) -> Result<FolderStats> {
+        let resp = self
+            .client
+            .get(self.url(&format!("/folders/{uuid}/stats")))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        let v = Self::check(resp, "getFolderStats").await?;
+        Ok(serde_json::from_value(v)?)
+    }
+
+    /// POST /folders/content/{uuid}/files/existence -> those of `files` that
+    /// already exist in the folder. Mirrors og
+    /// `storageClient.checkDuplicatedFiles`.
+    ///
+    /// `files` is a list of `(plain_name, file_type)` pairs, where the type is
+    /// the extension without the dot (`("notes", "txt")`). Answers with the
+    /// full records of the ones that collide, so a caller can go straight to
+    /// replacing them; an empty result means every name is free.
+    ///
+    /// Cheaper and more direct than listing the folder to look for collisions,
+    /// which is what upload paths do today.
+    pub async fn check_duplicate_files(
+        &self,
+        token: &str,
+        folder_uuid: &str,
+        files: &[(&str, &str)],
+    ) -> Result<Vec<DriveFileData>> {
+        let payload: Vec<Value> = files
+            .iter()
+            .map(|(name, ty)| json!({ "plainName": name, "type": ty }))
+            .collect();
+        let resp = self
+            .client
+            .post(self.url(&format!("/folders/content/{folder_uuid}/files/existence")))
+            .headers(self.auth_headers(token)?)
+            .json(&json!({ "files": payload }))
+            .send()
+            .await?;
+        let v = Self::check(resp, "checkDuplicateFiles").await?;
+        let list = v
+            .get("existentFiles")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(vec![]));
+        Ok(serde_json::from_value(list)?)
+    }
+
+    /// POST /folders/content/{uuid}/folders/existence -> those of `names` that
+    /// already exist as subfolders. Mirrors og
+    /// `storageClient.checkDuplicatedFolders`.
+    ///
+    /// Returns the raw records rather than a typed folder struct: core has no
+    /// camelCase folder DTO yet, and the other folder reads here
+    /// (`get_folder_meta`, the content listings) likewise hand back [`Value`].
+    pub async fn check_duplicate_folders(
+        &self,
+        token: &str,
+        folder_uuid: &str,
+        names: &[&str],
+    ) -> Result<Vec<Value>> {
+        let resp = self
+            .client
+            .post(self.url(&format!("/folders/content/{folder_uuid}/folders/existence")))
+            .headers(self.auth_headers(token)?)
+            .json(&json!({ "plainNames": names }))
+            .send()
+            .await?;
+        let v = Self::check(resp, "checkDuplicateFolders").await?;
+        Ok(v.get("existentFolders")
+            .and_then(|f| f.as_array())
+            .cloned()
+            .unwrap_or_default())
     }
 
     /// GET folder ancestors — the chain from the folder itself (first element) up
