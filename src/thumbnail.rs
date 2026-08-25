@@ -21,8 +21,10 @@ pub const MAX_WIDTH: u32 = 300;
 pub const MAX_HEIGHT: u32 = 300;
 pub const THUMBNAIL_TYPE: &str = "png";
 
-/// og `ThumbnailUtils.MAX_IMAGE_THUMBNAILABLE_SIZE_IN_MB` (500MB, despite the name).
-const MAX_IMAGE_THUMBNAILABLE_SIZE: u64 = 500 * 1024 * 1024;
+/// og `ThumbnailUtils.MAX_IMAGE_THUMBNAILABLE_SIZE_IN_BYTES` (128MiB). og cut this
+/// from the old 500MB in v1.6.8 (commit f8276b6) when it stopped buffering the
+/// upload in memory to feed the thumbnailer.
+const MAX_IMAGE_THUMBNAILABLE_SIZE: u64 = 128 * 1024 * 1024;
 
 /// The source extensions og will build an image thumbnail from (its
 /// `thumbnailableImageExtension` set).
@@ -149,6 +151,8 @@ mod tests {
         assert!(!is_image_thumbnailable("pdf", 1024)); // og only images here
         assert!(!is_image_thumbnailable("png", 0)); // zero-size
         assert!(!is_image_thumbnailable("png", MAX_IMAGE_THUMBNAILABLE_SIZE + 1));
+        assert!(is_image_thumbnailable("png", MAX_IMAGE_THUMBNAILABLE_SIZE));
+        assert_eq!(MAX_IMAGE_THUMBNAILABLE_SIZE, 128 * 1024 * 1024);
     }
 
     #[test]

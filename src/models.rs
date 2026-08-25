@@ -321,10 +321,11 @@ pub struct FileLimits {
     /// sets no per-file cap (field null or absent).
     #[serde(rename = "maxUploadFileSize", default)]
     pub max_upload_file_size: Option<u64>,
-    /// Whether the account may use Internxt Photos. Present in the live
-    /// response but **absent from og's OpenAPI schema**, so it's decoded
-    /// leniently — treat a `false` here as "unknown or no" rather than proof
-    /// the feature is off.
+    /// Whether the account may use Internxt Photos. Undocumented when this was
+    /// first observed in the live response; og's OpenAPI schema declares it as
+    /// a required `boolean` since sdk 1.20.x. Still decoded leniently, so a
+    /// `false` from an older backend means "unknown or no", not proof the
+    /// feature is off.
     #[serde(rename = "photosAccess", default)]
     pub photos_access: bool,
 }
