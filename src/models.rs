@@ -154,7 +154,7 @@ pub struct DownloadShard {
 
 // ---- Drive DTOs ----
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct DriveFileData {
     pub uuid: String,
     #[serde(default)]
@@ -361,4 +361,60 @@ pub struct FileVersion {
     /// When the retention policy drops this version.
     #[serde(rename = "expiresAt", default)]
     pub expires_at: Option<String>,
+}
+
+/// Aggregate counts for a folder subtree (`GET /folders/{uuid}/stats`).
+///
+/// The two `*_exact` flags matter: for large folders the backend answers with
+/// an estimate and clears them. Observed exact on a 31-file folder and
+/// **inexact on a ~1000-file one**, so never present these as precise without
+/// checking the flag.
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct FolderStats {
+    #[serde(rename = "fileCount", default)]
+    pub file_count: u64,
+    #[serde(rename = "totalSize", default)]
+    pub total_size: u64,
+    #[serde(rename = "isFileCountExact", default)]
+    pub is_file_count_exact: bool,
+    #[serde(rename = "isTotalSizeExact", default)]
+    pub is_total_size_exact: bool,
+}
+
+/// One node of `GET /folders/{uuid}/tree` — a folder with its files and,
+/// recursively, its subfolders. The whole subtree arrives in a single request.
+#[derive(Deserialize, Debug, Clone)]
+pub struct FolderTree {
+    pub uuid: String,
+    #[serde(default)]
+    pub id: u64,
+    #[serde(rename = "plainName", default)]
+    pub plain_name: Option<String>,
+    /// Encrypted name; `plain_name` is the readable one.
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(rename = "parentUuid", default)]
+    pub parent_uuid: Option<String>,
+    #[serde(rename = "parentId", default)]
+    pub parent_id: Option<u64>,
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Files directly in this folder.
+    #[serde(default)]
+    pub files: Vec<DriveFileData>,
+    /// Subfolders, each a full subtree of its own.
+    #[serde(default)]
+    pub children: Vec<FolderTree>,
+}
+
+impl FolderTree {
+    /// Total number of files in this subtree, including every descendant.
+    pub fn total_files(&self) -> usize {
+        self.files.len() + self.children.iter().map(|c| c.total_files()).sum::<usize>()
+    }
+
+    /// Total number of folders below this node.
+    pub fn total_folders(&self) -> usize {
+        self.children.len() + self.children.iter().map(|c| c.total_folders()).sum::<usize>()
+    }
 }
