@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 use crate::config;
-use crate::models::{Credentials, DriveFileData, FileLimits, FolderPathMeta, UserPublicKeyResponse};
+use crate::models::{Credentials, DriveFileData, FileLimits, FileVersion, FolderPathMeta, UserPublicKeyResponse};
 
 /// Connecting to a reachable API host should be fast; anything slower almost
 /// certainly means a dead peer or a firewalled black hole rather than a slow
@@ -389,6 +389,77 @@ impl DriveApi {
             .send()
             .await?;
         let v = Self::check(resp, "getUserPublicKey").await?;
+        Ok(serde_json::from_value(v)?)
+    }
+
+    /// GET /files/{uuid}/versions -> the file's version history, newest first.
+    /// Mirrors og `storageClient.getFileVersions`.
+    ///
+    /// **Nothing observed on the live API actually creates a version.** The
+    /// endpoint is real and answers correctly (`200 []` for a known file, `404
+    /// File not found` otherwise), and `GET /files/limits` reports
+    /// `versioning.enabled: true` — but replacing a file twice via
+    /// `PUT /files/{uuid}` (with and without `modificationTime`, polled for 12s
+    /// after each, on a file far under the 20 MB versioning cap) left the list
+    /// empty. No og client creates versions either: drive-web only reads,
+    /// restores and deletes them, labelling them "autosave versions". So
+    /// version creation is server-side and appears to be deployed-but-dark.
+    ///
+    /// Consequence: this returns real data if the backend ever starts minting
+    /// versions, but the field shapes come from og's OpenAPI schema rather than
+    /// an observed non-empty response, and [`Self::restore_file_version`] /
+    /// [`Self::delete_file_version`] could not be exercised against a real
+    /// version. Treat all three as unverified beyond their error paths.
+    pub async fn get_file_versions(&self, token: &str, uuid: &str) -> Result<Vec<FileVersion>> {
+        let resp = self
+            .client
+            .get(self.url(&format!("/files/{uuid}/versions")))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        let v = Self::check(resp, "getFileVersions").await?;
+        Ok(serde_json::from_value(v)?)
+    }
+
+    /// DELETE /files/{uuid}/versions/{version_id} — drop one stored version.
+    /// The file's current content is untouched. Mirrors og
+    /// `storageClient.deleteFileVersion`. See [`Self::get_file_versions`] for
+    /// why this is unverified against a real version.
+    pub async fn delete_file_version(
+        &self,
+        token: &str,
+        uuid: &str,
+        version_id: &str,
+    ) -> Result<()> {
+        let resp = self
+            .client
+            .delete(self.url(&format!("/files/{uuid}/versions/{version_id}")))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        Self::check(resp, "deleteFileVersion").await?;
+        Ok(())
+    }
+
+    /// POST /files/{uuid}/versions/{version_id}/restore — make a stored version
+    /// the file's current content, keeping its uuid. Returns the updated file.
+    /// Mirrors og `storageClient.restoreFileVersion`. See
+    /// [`Self::get_file_versions`] for why this is unverified against a real
+    /// version.
+    pub async fn restore_file_version(
+        &self,
+        token: &str,
+        uuid: &str,
+        version_id: &str,
+    ) -> Result<DriveFileData> {
+        let resp = self
+            .client
+            .post(self.url(&format!("/files/{uuid}/versions/{version_id}/restore")))
+            .headers(self.auth_headers(token)?)
+            .json(&json!({}))
+            .send()
+            .await?;
+        let v = Self::check(resp, "restoreFileVersion").await?;
         Ok(serde_json::from_value(v)?)
     }
 
