@@ -328,3 +328,37 @@ pub struct FileLimits {
     #[serde(rename = "photosAccess", default)]
     pub photos_access: bool,
 }
+
+/// One historical version of a file (`GET /files/{uuid}/versions`).
+///
+/// Versions are minted server-side — no client in og creates one explicitly,
+/// and drive-web presents them as "autosave versions". See
+/// [`crate::api::DriveApi::get_file_versions`] for what that means in practice.
+#[derive(Deserialize, Debug, Clone)]
+pub struct FileVersion {
+    /// Version id — the `{versionId}` of the delete/restore routes.
+    pub id: String,
+    /// Owning file's numeric id. Nullable in the schema.
+    #[serde(rename = "fileId", default)]
+    pub file_id: Option<String>,
+    /// Network (bridge) object holding this version's bytes. Downloading a
+    /// version is an ordinary download of this id from the file's bucket —
+    /// there is no version-specific download route.
+    #[serde(rename = "networkFileId", default)]
+    pub network_file_id: String,
+    #[serde(default)]
+    pub size: SizeField,
+    /// `EXISTS` or `DELETED`.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// When the file was last modified *before* this version was created.
+    #[serde(rename = "modificationTime", default)]
+    pub modification_time: Option<String>,
+    #[serde(rename = "createdAt", default)]
+    pub created_at: Option<String>,
+    #[serde(rename = "updatedAt", default)]
+    pub updated_at: Option<String>,
+    /// When the retention policy drops this version.
+    #[serde(rename = "expiresAt", default)]
+    pub expires_at: Option<String>,
+}
