@@ -21,12 +21,17 @@ pub const MAX_WIDTH: u32 = 300;
 pub const MAX_HEIGHT: u32 = 300;
 pub const THUMBNAIL_TYPE: &str = "png";
 
-/// og `ThumbnailUtils.MAX_IMAGE_THUMBNAILABLE_SIZE_IN_MB` (500MB, despite the name).
-const MAX_IMAGE_THUMBNAILABLE_SIZE: u64 = 500 * 1024 * 1024;
+/// og `ThumbnailUtils.MAX_IMAGE_THUMBNAILABLE_SIZE_IN_BYTES` (128MiB). og cut this
+/// from the old 500MB in v1.6.8 (commit f8276b6) when it stopped buffering the
+/// upload in memory to feed the thumbnailer.
+///
+/// Public so a caller can say *why* it skipped a file without repeating the
+/// number — see [`thumbnailable_summary`].
+pub const MAX_IMAGE_THUMBNAILABLE_SIZE: u64 = 128 * 1024 * 1024;
 
 /// The source extensions og will build an image thumbnail from (its
 /// `thumbnailableImageExtension` set).
-const THUMBNAILABLE_IMAGE_EXTENSIONS: &[&str] = &[
+pub const THUMBNAILABLE_IMAGE_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", // jpg
     "png",  // png
     "webp", // webp
@@ -42,6 +47,20 @@ pub fn is_image_thumbnailable(file_type: &str, size: u64) -> bool {
     }
     let ext = file_type.trim().to_lowercase();
     !ext.is_empty() && THUMBNAILABLE_IMAGE_EXTENSIONS.contains(&ext.as_str())
+}
+
+/// One line describing what [`is_image_thumbnailable`] accepts, e.g.
+/// `"jpg/jpeg/png/webp/gif/tif/tiff up to 128MB"`.
+///
+/// Exists so the rule lives in exactly one place: a caller explaining a skipped
+/// or rejected file would otherwise hard-code the extension list and the cap,
+/// and drift the next time og moves either (it has moved the cap twice).
+pub fn thumbnailable_summary() -> String {
+    format!(
+        "{} up to {}MB",
+        THUMBNAILABLE_IMAGE_EXTENSIONS.join("/"),
+        MAX_IMAGE_THUMBNAILABLE_SIZE / (1024 * 1024)
+    )
 }
 
 /// Read an image's `(width, height)` from its bytes without fully decoding it.
@@ -149,6 +168,16 @@ mod tests {
         assert!(!is_image_thumbnailable("pdf", 1024)); // og only images here
         assert!(!is_image_thumbnailable("png", 0)); // zero-size
         assert!(!is_image_thumbnailable("png", MAX_IMAGE_THUMBNAILABLE_SIZE + 1));
+        assert!(is_image_thumbnailable("png", MAX_IMAGE_THUMBNAILABLE_SIZE));
+        assert_eq!(MAX_IMAGE_THUMBNAILABLE_SIZE, 128 * 1024 * 1024);
+    }
+
+    #[test]
+    fn summary_reports_the_live_rule() {
+        assert_eq!(
+            thumbnailable_summary(),
+            "jpg/jpeg/png/webp/gif/tif/tiff up to 128MB"
+        );
     }
 
     #[test]
