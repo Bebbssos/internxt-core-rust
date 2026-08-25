@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 use crate::config;
-use crate::models::{Credentials, DriveFileData, FolderPathMeta};
+use crate::models::{Credentials, DriveFileData, FolderPathMeta, UserPublicKeyResponse};
 
 /// Connecting to a reachable API host should be fast; anything slower almost
 /// certainly means a dead peer or a firewalled black hole rather than a slow
@@ -356,6 +356,31 @@ impl DriveApi {
             .send()
             .await?;
         let v = Self::check(resp, "getFolderByPath").await?;
+        Ok(serde_json::from_value(v)?)
+    }
+
+    /// GET /users/public-key/{email} -> that user's public keys. Mirrors og
+    /// `usersClient.getPublicKey`.
+    ///
+    /// This is the lookup any "share with someone" flow starts from: the item
+    /// key gets wrapped to the recipient's key. Both are returned — the OpenPGP
+    /// `ecc` key every account has, and the post-quantum `kyber` key hybrid
+    /// accounts add (absent for ecc-only accounts).
+    ///
+    /// The email is percent-encoded, so a `+`-tagged address survives the round
+    /// trip.
+    pub async fn get_user_public_key(
+        &self,
+        token: &str,
+        email: &str,
+    ) -> Result<UserPublicKeyResponse> {
+        let resp = self
+            .client
+            .get(self.url(&format!("/users/public-key/{}", encode_path(email))))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        let v = Self::check(resp, "getUserPublicKey").await?;
         Ok(serde_json::from_value(v)?)
     }
 
