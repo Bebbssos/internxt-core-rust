@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 use crate::config;
-use crate::models::{Credentials, DriveFileData, FileLimits, FileVersion, FolderPathMeta, FolderStats, FolderTree, UserPublicKeyResponse};
+use crate::models::{Credentials, DriveFileData, FileLimits, FileVersion, FolderPathMeta, FolderStats, FolderTree, SharingRole, UserPublicKeyResponse};
 
 /// Connecting to a reachable API host should be fast; anything slower almost
 /// certainly means a dead peer or a firewalled black hole rather than a slow
@@ -939,6 +939,233 @@ impl DriveApi {
             .send()
             .await?;
         Self::check(resp, "getWorkspaceInvitations").await
+    }
+
+    // ---- Sharings (read + revoke) ----
+    //
+    // Covers listing what is shared, inspecting one item's sharing, and
+    // stopping a share. **Creating** a share is deliberately absent: it wraps
+    // the item key to the recipient (or to a link password), which needs
+    // crypto this crate doesn't have yet. That belongs in its own change.
+    //
+    // `item_type` throughout is `"file"` or `"folder"`, matching og's routes.
+    //
+    // The test account had nothing shared, so the list endpoints were verified
+    // answering 200 with empty collections, and the per-item ones through their
+    // error paths (`404 Item is not being shared`). Only `get_sharing_roles`
+    // and `get_share_domains` returned real data, and they are the only two
+    // given typed results here — the rest hand back raw [`Value`] rather than a
+    // schema-derived guess.
+
+    /// GET /sharings/roles -> the roles a share recipient can be given.
+    /// Observed live: `EDITOR`, `READER`, `TEAM_MANAGER`.
+    pub async fn get_sharing_roles(&self, token: &str) -> Result<Vec<SharingRole>> {
+        let resp = self
+            .client
+            .get(self.url("/sharings/roles"))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        let v = Self::check(resp, "getSharingRoles").await?;
+        Ok(serde_json::from_value(v)?)
+    }
+
+    /// GET /storage/share/domains -> the domains public share links may use.
+    /// Returns the bare list (the wire shape wraps it in `{ "list": [...] }`).
+    pub async fn get_share_domains(&self, token: &str) -> Result<Vec<String>> {
+        let resp = self
+            .client
+            .get(self.url("/storage/share/domains"))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        let v = Self::check(resp, "getShareDomains").await?;
+        Ok(v.get("list")
+            .and_then(|l| l.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|d| d.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// GET /sharings/files -> files the caller has shared. Paginated.
+    /// `order_by` takes og's `field:DIRECTION` form, e.g. `createdAt:DESC`.
+    pub async fn get_shared_files(
+        &self,
+        token: &str,
+        page: u32,
+        per_page: u32,
+        order_by: &str,
+    ) -> Result<Value> {
+        self.sharings_page(token, "files", page, per_page, order_by)
+            .await
+    }
+
+    /// GET /sharings/folders -> folders the caller has shared. Paginated.
+    /// See [`Self::get_shared_files`] for `order_by`.
+    pub async fn get_shared_folders(
+        &self,
+        token: &str,
+        page: u32,
+        per_page: u32,
+        order_by: &str,
+    ) -> Result<Value> {
+        self.sharings_page(token, "folders", page, per_page, order_by)
+            .await
+    }
+
+    async fn sharings_page(
+        &self,
+        token: &str,
+        kind: &str,
+        page: u32,
+        per_page: u32,
+        order_by: &str,
+    ) -> Result<Value> {
+        let resp = self
+            .client
+            .get(self.url(&format!(
+                "/sharings/{kind}?page={page}&perPage={per_page}&orderBy={}",
+                encode_path(order_by)
+            )))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        Self::check(resp, "getSharings").await
+    }
+
+    /// GET /sharings/shared-with-me/folders -> folders other people shared with
+    /// the caller. Paginated.
+    pub async fn get_shared_with_me_folders(
+        &self,
+        token: &str,
+        page: u32,
+        per_page: u32,
+    ) -> Result<Value> {
+        let resp = self
+            .client
+            .get(self.url(&format!(
+                "/sharings/shared-with-me/folders?page={page}&perPage={per_page}"
+            )))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        Self::check(resp, "getSharedWithMeFolders").await
+    }
+
+    /// GET /sharings/shared-by-me/folders -> folders the caller has shared out.
+    /// Paginated.
+    pub async fn get_shared_by_me_folders(
+        &self,
+        token: &str,
+        page: u32,
+        per_page: u32,
+    ) -> Result<Value> {
+        let resp = self
+            .client
+            .get(self.url(&format!(
+                "/sharings/shared-by-me/folders?page={page}&perPage={per_page}"
+            )))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        Self::check(resp, "getSharedByMeFolders").await
+    }
+
+    /// GET /sharings/invites -> sharing invitations awaiting the caller.
+    pub async fn get_sharing_invites(
+        &self,
+        token: &str,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Value> {
+        let resp = self
+            .client
+            .get(self.url(&format!(
+                "/sharings/invites?limit={limit}&offset={offset}"
+            )))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        Self::check(resp, "getSharingInvites").await
+    }
+
+    /// GET /sharings/{item_type}/{item_id}/info -> details of how one item is
+    /// shared. An item that isn't shared answers `404 Item is not being
+    /// shared`, surfaced here as an `Err` — that's the normal "not shared"
+    /// signal, not a transport failure.
+    pub async fn get_item_sharing_info(
+        &self,
+        token: &str,
+        item_type: &str,
+        item_id: &str,
+    ) -> Result<Value> {
+        let resp = self
+            .client
+            .get(self.url(&format!("/sharings/{item_type}/{item_id}/info")))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        Self::check(resp, "getItemSharingInfo").await
+    }
+
+    /// GET /sharings/{item_type}/{item_id}/type -> whether the item is shared
+    /// publicly or privately. Same `404` behaviour as
+    /// [`Self::get_item_sharing_info`].
+    pub async fn get_item_sharing_type(
+        &self,
+        token: &str,
+        item_type: &str,
+        item_id: &str,
+    ) -> Result<Value> {
+        let resp = self
+            .client
+            .get(self.url(&format!("/sharings/{item_type}/{item_id}/type")))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        Self::check(resp, "getItemSharingType").await
+    }
+
+    /// GET /sharings/{item_type}/{item_id}/invites -> people invited to this
+    /// item. Unlike `info`/`type`, an unshared item answers `200 []` rather
+    /// than 404.
+    pub async fn get_item_sharing_invites(
+        &self,
+        token: &str,
+        item_type: &str,
+        item_id: &str,
+    ) -> Result<Value> {
+        let resp = self
+            .client
+            .get(self.url(&format!("/sharings/{item_type}/{item_id}/invites")))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        Self::check(resp, "getItemSharingInvites").await
+    }
+
+    /// DELETE /sharings/{item_type}/{item_id} -> stop sharing an item.
+    ///
+    /// **Idempotent**: revoking an item that isn't shared succeeds rather than
+    /// erroring — verified live against an unshared folder. So an `Ok` here
+    /// means "not shared any more", not "a share was actually removed"; check
+    /// [`Self::get_item_sharing_info`] first if you need to tell those apart.
+    ///
+    /// Only that no-op path was exercised. Revoking a *real* share was not
+    /// tested, since creating one needs the crypto this change deliberately
+    /// leaves out.
+    pub async fn stop_sharing(&self, token: &str, item_type: &str, item_id: &str) -> Result<()> {
+        let resp = self
+            .client
+            .delete(self.url(&format!("/sharings/{item_type}/{item_id}")))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        Self::check(resp, "stopSharing").await?;
+        Ok(())
     }
 
     /// GET /auth/logout (best effort; invalidates the session token server-side).

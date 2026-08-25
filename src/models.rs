@@ -418,3 +418,16 @@ impl FolderTree {
         self.children.len() + self.children.iter().map(|c| c.total_folders()).sum::<usize>()
     }
 }
+
+/// A role a shared item's recipient can hold (`GET /sharings/roles`).
+/// Observed live: `EDITOR`, `READER`, `TEAM_MANAGER`.
+#[derive(Deserialize, Debug, Clone)]
+pub struct SharingRole {
+    pub id: String,
+    /// Uppercase role name, e.g. `READER`.
+    pub name: String,
+    #[serde(rename = "createdAt", default)]
+    pub created_at: Option<String>,
+    #[serde(rename = "updatedAt", default)]
+    pub updated_at: Option<String>,
+}
