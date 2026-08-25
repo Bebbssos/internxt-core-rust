@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 use crate::config;
-use crate::models::{Credentials, DriveFileData};
+use crate::models::{Credentials, DriveFileData, FolderPathMeta};
 
 /// Connecting to a reachable API host should be fast; anything slower almost
 /// certainly means a dead peer or a firewalled black hole rather than a slow
@@ -63,6 +63,24 @@ fn base_headers() -> HeaderMap {
     h
 }
 
+/// Percent-encode a Drive path for use in a query string, keeping `/` literal.
+///
+/// Everything outside the RFC 3986 unreserved set (plus `/`) is escaped, so a
+/// space becomes `%20` rather than `+`: the `+`-for-space convention belongs to
+/// form encoding, and only `%20` was verified against the live endpoint.
+fn encode_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for b in path.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 impl DriveApi {
     pub fn new() -> Self {
         Self::with_timeouts(DriveTimeouts::default())
@@ -95,6 +113,16 @@ impl DriveApi {
 
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base, path)
+    }
+
+    /// URL for the `?path=` metadata lookups (`/files/meta`, `/folders/meta`).
+    ///
+    /// The Drive path is percent-encoded before it goes into the query string.
+    /// og interpolates it raw, which breaks on any name containing `&`, `#`,
+    /// `?` or `%` — ordinary characters in a filename. `/` is deliberately left
+    /// literal: it's the path separator the endpoint is parsing, not data.
+    fn meta_by_path_url(&self, kind: &str, path: &str) -> String {
+        format!("{}?path={}", self.url(&format!("/{kind}/meta")), encode_path(path))
     }
 
     /// `true` when this client is scoped to an active workspace. Backups have
@@ -286,6 +314,49 @@ impl DriveApi {
             .send()
             .await?;
         Self::check(resp, "getFileMeta").await
+    }
+
+    /// GET /files/meta?path=... — resolve an absolute Drive path to a file in a
+    /// **single** request, instead of walking one listing per path component.
+    /// Mirrors og `storageClient.getFileByPath`, which the node CLI uses for
+    /// every WebDAV resource lookup.
+    ///
+    /// Path rules, confirmed against the live API:
+    /// * the leading `/` is **required** — without it the server answers
+    ///   `400 Invalid path provided`;
+    /// * the file **extension is part of the path** (`/dir/notes.txt`, not
+    ///   `/dir/notes`) — the bare stem answers `404 File not found`;
+    /// * a missing file is a `404`, surfaced here as an `Err`.
+    ///
+    /// Not workspace-aware: og exposes no workspace-scoped variant, and this
+    /// account had no workspace to verify one against, so callers holding a
+    /// workspace-scoped client must keep using component-wise resolution.
+    pub async fn get_file_by_path(&self, token: &str, path: &str) -> Result<DriveFileData> {
+        let resp = self
+            .client
+            .get(self.meta_by_path_url("files", path))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        let v = Self::check(resp, "getFileByPath").await?;
+        Ok(serde_json::from_value(v)?)
+    }
+
+    /// GET /folders/meta?path=... — the folder counterpart of
+    /// [`Self::get_file_by_path`]; same path rules (leading `/` required, a
+    /// trailing `/` is tolerated, missing is a `404`).
+    ///
+    /// Returns [`FolderPathMeta`] rather than the usual folder value because
+    /// this endpoint alone answers in snake_case — see that type's note.
+    pub async fn get_folder_by_path(&self, token: &str, path: &str) -> Result<FolderPathMeta> {
+        let resp = self
+            .client
+            .get(self.meta_by_path_url("folders", path))
+            .headers(self.auth_headers(token)?)
+            .send()
+            .await?;
+        let v = Self::check(resp, "getFolderByPath").await?;
+        Ok(serde_json::from_value(v)?)
     }
 
     /// GET folder ancestors — the chain from the folder itself (first element) up
@@ -802,5 +873,40 @@ impl DriveApi {
             .await?;
         Self::check(resp, "deleteBackupDevice").await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_path;
+
+    #[test]
+    fn encode_path_keeps_separators_and_unreserved() {
+        assert_eq!(encode_path("/dir/notes.txt"), "/dir/notes.txt");
+        assert_eq!(encode_path("/a-b_c.d~e/f"), "/a-b_c.d~e/f");
+    }
+
+    #[test]
+    fn encode_path_escapes_space_as_percent_20_not_plus() {
+        assert_eq!(
+            encode_path("/TestingZone/Untitled design.zip"),
+            "/TestingZone/Untitled%20design.zip"
+        );
+    }
+
+    #[test]
+    fn encode_path_escapes_query_breaking_characters() {
+        // These are legal in a Drive filename and would otherwise truncate or
+        // corrupt the query string — the bug og's raw interpolation has.
+        assert_eq!(encode_path("/a&b"), "/a%26b");
+        assert_eq!(encode_path("/a?b"), "/a%3Fb");
+        assert_eq!(encode_path("/a#b"), "/a%23b");
+        assert_eq!(encode_path("/100%"), "/100%25");
+        assert_eq!(encode_path("/a+b"), "/a%2Bb");
+    }
+
+    #[test]
+    fn encode_path_escapes_non_ascii_as_utf8_bytes() {
+        assert_eq!(encode_path("/café"), "/caf%C3%A9");
     }
 }

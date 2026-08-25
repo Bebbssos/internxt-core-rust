@@ -225,3 +225,42 @@ impl<'de> Deserialize<'de> for SizeField {
         Ok(SizeField(n))
     }
 }
+
+/// Folder metadata as returned by `GET /folders/meta?path=...`
+/// (og `storageClient.getFolderByPath`).
+///
+/// This endpoint answers in **snake_case** (`plain_name`, `parent_uuid`, ...),
+/// unlike `/folders/{uuid}/meta` and every other folder route, which use
+/// camelCase — so it needs its own struct rather than reusing the folder value
+/// shape. The asymmetry is real, not a guess: confirmed against the live API,
+/// where the sibling `GET /files/meta?path=` *does* answer in camelCase and
+/// deserializes straight into [`DriveFileData`].
+#[derive(Deserialize, Debug, Clone)]
+pub struct FolderPathMeta {
+    pub uuid: String,
+    #[serde(default)]
+    pub id: u64,
+    #[serde(default)]
+    pub plain_name: Option<String>,
+    /// Encrypted name (the on-wire `name`); `plain_name` is the readable one.
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub parent_id: Option<u64>,
+    #[serde(default)]
+    pub parent_uuid: Option<String>,
+    #[serde(default)]
+    pub bucket: Option<String>,
+    #[serde(default)]
+    pub deleted: bool,
+    #[serde(default)]
+    pub removed: bool,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    #[serde(default)]
+    pub creation_time: Option<String>,
+    #[serde(default)]
+    pub modification_time: Option<String>,
+}
