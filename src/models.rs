@@ -290,3 +290,41 @@ pub struct UserPublicKeyResponse {
     #[serde(default)]
     pub keys: UserPublicKeys,
 }
+
+/// Per-plan versioning limits, nested inside [`FileLimits`].
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct VersioningLimits {
+    /// Whether the plan may keep file versions at all.
+    ///
+    /// Note this reports the *plan's* entitlement. On the account this was
+    /// verified against it read `true` while no version was ever actually
+    /// minted — see [`crate::api::DriveApi::get_file_versions`].
+    #[serde(default)]
+    pub enabled: bool,
+    /// Largest file, in bytes, eligible to be versioned.
+    #[serde(rename = "maxFileSize", default)]
+    pub max_file_size: u64,
+    /// How long a version is kept before the retention policy drops it.
+    #[serde(rename = "retentionDays", default)]
+    pub retention_days: u32,
+    /// How many versions are kept per file.
+    #[serde(rename = "maxVersions", default)]
+    pub max_versions: u32,
+}
+
+/// Response of `GET /files/limits` (og `storageClient.getFileVersionLimits`).
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct FileLimits {
+    #[serde(default)]
+    pub versioning: VersioningLimits,
+    /// Largest single upload the plan allows, in bytes. `None` when the plan
+    /// sets no per-file cap (field null or absent).
+    #[serde(rename = "maxUploadFileSize", default)]
+    pub max_upload_file_size: Option<u64>,
+    /// Whether the account may use Internxt Photos. Present in the live
+    /// response but **absent from og's OpenAPI schema**, so it's decoded
+    /// leniently — treat a `false` here as "unknown or no" rather than proof
+    /// the feature is off.
+    #[serde(rename = "photosAccess", default)]
+    pub photos_access: bool,
+}
