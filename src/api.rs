@@ -404,21 +404,27 @@ impl DriveApi {
     /// GET /files/{uuid}/versions -> the file's version history, newest first.
     /// Mirrors og `storageClient.getFileVersions`.
     ///
-    /// **Nothing observed on the live API actually creates a version.** The
-    /// endpoint is real and answers correctly (`200 []` for a known file, `404
-    /// File not found` otherwise), and `GET /files/limits` reports
-    /// `versioning.enabled: true` — but replacing a file twice via
-    /// `PUT /files/{uuid}` (with and without `modificationTime`, polled for 12s
-    /// after each, on a file far under the 20 MB versioning cap) left the list
-    /// empty. No og client creates versions either: drive-web only reads,
-    /// restores and deletes them, labelling them "autosave versions". So
-    /// version creation is server-side and appears to be deployed-but-dark.
+    /// **Versions are minted only for a fixed set of file types.** Replacing a
+    /// file in place with [`Self::replace_file`] (`PUT /files/{uuid}`) archives
+    /// the previous content as a version when the file's extension is `pdf`,
+    /// `docx`, `xlsx` or `csv`, and stores nothing at all for any other type.
+    /// That is the same set drive-web gates its version-history UI on
+    /// (`ALLOWED_VERSIONING_EXTENSIONS` in
+    /// `views/Drive/components/VersionHistory/utils`), but the backend enforces
+    /// it too — the extension does not merely decide whether the UI offers the
+    /// feature. `GET /files/limits` reports the plan entitlement
+    /// (`versioning.enabled`) and says nothing about the extension rule.
     ///
-    /// Consequence: this returns real data if the backend ever starts minting
-    /// versions, but the field shapes come from og's OpenAPI schema rather than
-    /// an observed non-empty response, and [`Self::restore_file_version`] /
-    /// [`Self::delete_file_version`] could not be exercised against a real
-    /// version. Treat all three as unverified beyond their error paths.
+    /// Verified live against the production API: a `.pdf`, a `.csv` and a
+    /// `.docx` each produced exactly one version after a second in-place
+    /// replace, while a `.txt` replaced the same way stayed at `200 []` however
+    /// long it was polled. Entries carry `id`, `fileId` (the file's uuid),
+    /// `networkFileId` (the archived content), `size`, `status`,
+    /// `modificationTime`, `createdAt`/`updatedAt` and an `expiresAt` 30 days
+    /// out — stored versions are not kept forever.
+    ///
+    /// So `200 []` for a file that was just replaced is a normal answer, not a
+    /// sign that the feature is off: check the extension first.
     pub async fn get_file_versions(&self, token: &str, uuid: &str) -> Result<Vec<FileVersion>> {
         let resp = self
             .client
@@ -432,8 +438,9 @@ impl DriveApi {
 
     /// DELETE /files/{uuid}/versions/{version_id} — drop one stored version.
     /// The file's current content is untouched. Mirrors og
-    /// `storageClient.deleteFileVersion`. See [`Self::get_file_versions`] for
-    /// why this is unverified against a real version.
+    /// `storageClient.deleteFileVersion`. Verified live against a real version:
+    /// the entry disappears from [`Self::get_file_versions`] and the file still
+    /// serves the content it had before the call.
     pub async fn delete_file_version(
         &self,
         token: &str,
@@ -452,9 +459,11 @@ impl DriveApi {
 
     /// POST /files/{uuid}/versions/{version_id}/restore — make a stored version
     /// the file's current content, keeping its uuid. Returns the updated file.
-    /// Mirrors og `storageClient.restoreFileVersion`. See
-    /// [`Self::get_file_versions`] for why this is unverified against a real
-    /// version.
+    /// Mirrors og `storageClient.restoreFileVersion`. Verified live against a
+    /// real version: the file keeps its uuid, its content and `size` become the
+    /// restored version's, its `fileId` becomes that version's `networkFileId`,
+    /// and the restored entry leaves the history — the content it replaced is
+    /// *not* archived in its place, so a restore is not itself undoable.
     pub async fn restore_file_version(
         &self,
         token: &str,
@@ -973,11 +982,18 @@ impl DriveApi {
     // uncertainty visible, and match how the other workspace and folder reads
     // here already behave.
     //
-    // Verified only in the sense that the routes exist and answer 200 with an
-    // empty body: `/workspaces/`, `/workspaces/pending-setup` and
-    // `/workspaces/invitations`. The `{workspace_id}`-scoped calls below could
-    // not be reached at all. Anyone with a populated workspace should re-probe
-    // and promote these to real types.
+    // The account-wide reads answer 200 with an empty body on an account with
+    // no workspace: `/workspaces/`, `/workspaces/pending-setup` and
+    // `/workspaces/invitations`.
+    //
+    // The `{workspace_id}`-scoped calls below exist and are reachable — each
+    // answers `404 {"message":"Workspace not found"}` for an id the caller
+    // cannot see, which is the handler talking, not the router: a genuinely
+    // absent route answers `404 Cannot GET /api/workspaces/...` instead.
+    // Confirmed for `/workspaces/{id}` and its `/members`, `/teams`, `/usage`,
+    // `/usage/member` and `/credentials` children. What is still unverified is
+    // the *shape* of a successful response — that needs a populated workspace.
+    // Anyone with one should re-probe and promote these to real types.
 
     /// GET /workspaces/{id} -> a single workspace's details.
     /// Unverified — see the note above.
@@ -1057,6 +1073,9 @@ impl DriveApi {
 
     /// GET /workspaces/invitations -> workspace invitations awaiting the
     /// caller's response. Answers `200 []` on an account with none.
+    ///
+    /// `limit` must be an integer in `1..=25` and `offset` must be >= 0; the
+    /// API rejects anything else with a `400` listing the violated rules.
     pub async fn get_workspace_invitations(
         &self,
         token: &str,
