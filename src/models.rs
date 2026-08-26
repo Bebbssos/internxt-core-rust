@@ -174,6 +174,92 @@ pub struct DriveFileData {
     /// older responses, where it decodes as `false`.
     #[serde(rename = "isFavorite", default)]
     pub is_favorite: bool,
+    /// Uuid of the folder the file sits in. Present on the reads that return a
+    /// file from outside a folder listing (`/files/recents`, `/files/meta`),
+    /// which is what makes it possible to say *where* such a file lives.
+    #[serde(rename = "folderUuid", default)]
+    pub folder_uuid: Option<String>,
+    /// The file's own modification time (client-supplied, preserved across
+    /// upload and replace) — not the record's. This is the timestamp change
+    /// detection compares against; prefer [`Self::modified_at`], which falls
+    /// back to `updated_at` when a response omits it.
+    #[serde(rename = "modificationTime", default)]
+    pub modification_time: Option<String>,
+    /// The file's own creation time, as opposed to when the record was written.
+    #[serde(rename = "creationTime", default)]
+    pub creation_time: Option<String>,
+    /// When the *record* was created server-side.
+    #[serde(rename = "createdAt", default)]
+    pub created_at: Option<String>,
+    /// When the *record* last changed server-side (a rename or a move bumps
+    /// this without touching [`Self::modification_time`]).
+    #[serde(rename = "updatedAt", default)]
+    pub updated_at: Option<String>,
+    /// Lifecycle state: `EXISTS`, `TRASHED` or `DELETED`. Some responses omit
+    /// it — see [`Self::is_live`] for the reading that treats an absent status
+    /// the way the folder listings do.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Thumbnails registered for this file. The folder listing, the folder tree
+    /// and `/files/recents` carry them; `/files/{uuid}/meta` omits the key
+    /// entirely, so an empty vec means "not reported here", not "none exist".
+    #[serde(default)]
+    pub thumbnails: Vec<ThumbnailMeta>,
+    /// The parent folder, inlined. Only `/files/recents` populates it — the
+    /// folder listing, `/files/{uuid}/meta` and the folder tree all send the
+    /// key as `null` and offer [`Self::folder_uuid`] instead.
+    #[serde(default)]
+    pub folder: Option<FileParentFolder>,
+}
+
+impl DriveFileData {
+    /// The file's modification time, falling back to the record's `updatedAt`
+    /// when the response omits it.
+    ///
+    /// Change detection wants this rather than either field alone:
+    /// `modificationTime` is the client-supplied one that survives an upload,
+    /// but not every read returns it.
+    pub fn modified_at(&self) -> Option<&str> {
+        self.modification_time
+            .as_deref()
+            .or(self.updated_at.as_deref())
+    }
+
+    /// Whether the file counts as present: `status` is `EXISTS`, empty or
+    /// absent.
+    ///
+    /// Absent reads as live because the responses that omit `status` only ever
+    /// carry live items — the same rule the folder listings apply.
+    pub fn is_live(&self) -> bool {
+        !matches!(self.status.as_deref(), Some(s) if !s.is_empty() && s != "EXISTS")
+    }
+
+    /// Full filename: `plainName` plus the `type` extension when there is one.
+    pub fn full_name(&self) -> Option<String> {
+        let plain = self.plain_name.as_deref().or(self.name.as_deref())?;
+        match self.file_type.as_deref() {
+            Some(t) if !t.is_empty() => Some(format!("{plain}.{t}")),
+            _ => Some(plain.to_string()),
+        }
+    }
+}
+
+/// The parent folder as `/files/recents` inlines it under `folder`. Only the
+/// identifying fields are typed — the rest of that object repeats what a folder
+/// read already returns.
+#[derive(Deserialize, Debug, Clone)]
+pub struct FileParentFolder {
+    #[serde(default)]
+    pub uuid: Option<String>,
+    #[serde(rename = "plainName", default)]
+    pub plain_name: Option<String>,
+    /// Encrypted name; `plain_name` is the readable one.
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(rename = "parentUuid", default)]
+    pub parent_uuid: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 /// A thumbnail as returned inside a folder-content file listing (`files[].thumbnails[]`
@@ -496,4 +582,128 @@ pub struct SharingRole {
     pub created_at: Option<String>,
     #[serde(rename = "updatedAt", default)]
     pub updated_at: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The shape `/files/recents` answers with — the only read that inlines the
+    /// parent folder. Field names and nesting are taken from a live response.
+    #[test]
+    fn drive_file_data_decodes_a_recents_record() {
+        let f: DriveFileData = serde_json::from_value(json!({
+            "uuid": "file-uuid",
+            "fileId": "network-file-id",
+            "bucket": "bucket-id",
+            "plainName": "notes",
+            "type": "txt",
+            "size": "1234",
+            "folderUuid": "parent-uuid",
+            "creationTime": "2026-01-02T03:04:05.000Z",
+            "modificationTime": "2026-02-03T04:05:06.000Z",
+            "createdAt": "2026-01-02T03:04:05.678Z",
+            "updatedAt": "2026-02-03T04:05:06.789Z",
+            "status": "EXISTS",
+            "folder": {
+                "uuid": "parent-uuid",
+                "plainName": "Documents",
+                "parentUuid": "grandparent-uuid",
+                "status": "EXISTS",
+                // Fields we deliberately don't type must not break decoding.
+                "userId": 42,
+                "encryptVersion": "03-aes"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(f.size.0, 1234);
+        assert_eq!(f.folder_uuid.as_deref(), Some("parent-uuid"));
+        assert_eq!(f.modified_at(), Some("2026-02-03T04:05:06.000Z"));
+        assert_eq!(f.full_name().as_deref(), Some("notes.txt"));
+        assert!(f.is_live());
+        let parent = f.folder.expect("recents inlines the parent folder");
+        assert_eq!(parent.plain_name.as_deref(), Some("Documents"));
+    }
+
+    /// Every added field is optional: the older, narrower shape still decodes.
+    #[test]
+    fn drive_file_data_decodes_a_record_without_any_of_the_new_fields() {
+        let f: DriveFileData = serde_json::from_value(json!({
+            "uuid": "file-uuid",
+            "plainName": "archive",
+            "type": "",
+            "size": 0
+        }))
+        .unwrap();
+
+        assert!(f.modification_time.is_none());
+        assert!(f.folder.is_none());
+        assert!(f.thumbnails.is_empty());
+        assert_eq!(f.modified_at(), None);
+        // An empty `type` must not produce a trailing dot.
+        assert_eq!(f.full_name().as_deref(), Some("archive"));
+        // No status at all reads as live, like the folder listings treat it.
+        assert!(f.is_live());
+    }
+
+    #[test]
+    fn modified_at_falls_back_to_updated_at_and_status_gates_liveness() {
+        let no_mtime: DriveFileData = serde_json::from_value(json!({
+            "uuid": "u",
+            "updatedAt": "2026-02-03T04:05:06.789Z",
+            "status": "TRASHED"
+        }))
+        .unwrap();
+        assert_eq!(no_mtime.modified_at(), Some("2026-02-03T04:05:06.789Z"));
+        assert!(!no_mtime.is_live());
+
+        let deleted: DriveFileData =
+            serde_json::from_value(json!({ "uuid": "u", "status": "DELETED" })).unwrap();
+        assert!(!deleted.is_live());
+
+        let blank: DriveFileData =
+            serde_json::from_value(json!({ "uuid": "u", "status": "" })).unwrap();
+        assert!(blank.is_live());
+    }
+
+    /// The tree's file objects are the listing's, so a caller taking files
+    /// straight from a subtree gets the same timestamps and thumbnails.
+    #[test]
+    fn folder_tree_files_carry_the_timestamps_change_detection_needs() {
+        let tree: FolderTree = serde_json::from_value(json!({
+            "uuid": "root-uuid",
+            "plainName": "root",
+            "status": "EXISTS",
+            "files": [{
+                "uuid": "file-uuid",
+                "fileId": "network-file-id",
+                "bucket": "bucket-id",
+                "plainName": "report",
+                "type": "pdf",
+                "size": 9001,
+                "modificationTime": "2026-02-03T04:05:06.000Z",
+                "updatedAt": "2026-02-03T04:05:06.789Z",
+                "status": "EXISTS",
+                "thumbnails": [{
+                    "id": 7,
+                    "bucket_id": "thumb-bucket",
+                    "bucket_file": "thumb-file",
+                    "type": "png",
+                    "size": 512,
+                    "max_width": 300,
+                    "max_height": 300
+                }]
+            }],
+            "children": []
+        }))
+        .unwrap();
+
+        let f = &tree.files[0];
+        assert_eq!(f.modified_at(), Some("2026-02-03T04:05:06.000Z"));
+        assert_eq!(f.size.0, 9001);
+        assert_eq!(f.thumbnails.len(), 1);
+        assert_eq!(f.thumbnails[0].bucket_file, "thumb-file");
+    }
 }

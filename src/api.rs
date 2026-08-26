@@ -321,8 +321,8 @@ impl DriveApi {
         Ok(serde_json::from_value(v)?)
     }
 
-    /// GET /files/{uuid}/meta — raw JSON (keeps fields absent from
-    /// [`DriveFileData`], e.g. `folderUuid`, needed to reconstruct a file's path).
+    /// GET /files/{uuid}/meta — raw JSON, for the fields [`DriveFileData`]
+    /// still doesn't type (`encryptVersion`, `sharings`, the numeric ids).
     pub async fn get_file_meta_value(&self, token: &str, uuid: &str) -> Result<Value> {
         let resp = self
             .client
@@ -586,9 +586,11 @@ impl DriveApi {
     /// files, newest first, across every folder. Mirrors og
     /// `storageClient.getRecentFiles`.
     ///
-    /// Entries carry `folderUuid`, so a caller can resolve where each file
-    /// lives; [`DriveFileData`] keeps only the fields core needs, so reach for
-    /// [`Self::get_file_meta_value`] if the raw record is wanted.
+    /// Entries carry the timestamps a listing does (`modificationTime`,
+    /// `creationTime`, `createdAt`/`updatedAt`) plus `folderUuid` *and* the
+    /// parent folder inlined under `folder` — [`DriveFileData::folder`] — so a
+    /// caller can name where each file lives without a request per row. This
+    /// is the only read that inlines the parent.
     pub async fn get_recent_files(&self, token: &str, limit: u32) -> Result<Vec<DriveFileData>> {
         let resp = self
             .client
