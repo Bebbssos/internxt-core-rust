@@ -11,11 +11,16 @@
 //! * `auth::login`'s 2FA code and `sso::login`'s browser-open are injected callbacks;
 //! * `auth::refresh_credentials` reports best-effort warnings through an `on_warn`
 //!   callback and does no filesystem I/O — the front-end owns credential persistence.
+//!
+//! Failures come back as [`anyhow::Error`]; an HTTP failure wraps an [`ApiError`],
+//! so a front-end can `downcast_ref::<ApiError>()` and reuse the upstream status
+//! (e.g. a WebDAV server answering 404/403/507 instead of a blanket 500).
 
 pub mod api;
 pub mod auth;
 pub mod config;
 pub mod crypto;
+pub mod error;
 pub mod models;
 pub mod network;
 pub mod progress;
@@ -26,5 +31,6 @@ pub mod transfer;
 #[cfg(feature = "vpn")]
 pub mod vpn;
 
+pub use error::ApiError;
 pub use models::Credentials;
 pub use progress::ProgressSink;

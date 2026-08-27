@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 use crate::config;
+use crate::error::ApiError;
 use crate::models::{Credentials, DriveFileData, FileLimits, FileVersion, FolderPathMeta, FolderStats, FolderTree, SearchFilters, SearchResult, SharingRole, UserPublicKeyResponse};
 
 /// Connecting to a reachable API host should be fast; anything slower almost
@@ -152,11 +153,14 @@ impl DriveApi {
         Ok(h)
     }
 
+    /// Turn a response into its JSON body, or into a typed [`ApiError`] that
+    /// keeps the upstream status (a WebDAV/SFTP front-end forwards it to its
+    /// own client instead of collapsing everything to 500).
     async fn check(resp: reqwest::Response, ctx: &str) -> Result<Value> {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(anyhow!("{ctx} failed: HTTP {status}: {text}"));
+            return Err(ApiError::new(ctx, status, text).into());
         }
         if text.is_empty() {
             return Ok(Value::Null);

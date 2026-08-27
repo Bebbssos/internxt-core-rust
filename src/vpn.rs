@@ -26,6 +26,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use crate::config;
+use crate::error::ApiError;
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -158,11 +159,13 @@ impl VpnApi {
         format!("{}{}", self.base, path)
     }
 
+    /// Same contract as [`crate::api::DriveApi`]'s: a failure becomes a typed
+    /// [`ApiError`] carrying the upstream status.
     async fn check(resp: reqwest::Response, ctx: &str) -> Result<Value> {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(anyhow!("{ctx} failed: HTTP {status}: {text}"));
+            return Err(ApiError::new(ctx, status, text).into());
         }
         if text.is_empty() {
             return Ok(Value::Null);
