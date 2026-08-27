@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use crate::config;
 use crate::crypto;
+use crate::error::ApiError;
 use crate::models::{DownloadLinksResponse, FinishUploadResponse, StartUploadResponse};
 
 /// Connecting to a reachable host should be fast; anything slower almost
@@ -141,7 +142,7 @@ impl NetworkApi {
             .await?;
         let (status, text) = (resp.status(), resp.text().await.unwrap_or_default());
         if !status.is_success() {
-            return Err(anyhow!("startUpload failed: HTTP {status}: {text}"));
+            return Err(ApiError::new("startUpload", status, text).into());
         }
         Ok(serde_json::from_str(&text)?)
     }
@@ -160,9 +161,7 @@ impl NetworkApi {
             .send()
             .await?;
         if !resp.status().is_success() {
-            let s = resp.status();
-            let t = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Failed to upload file: {s} {t}"));
+            return Err(ApiError::from_response("uploadFile", resp).await.into());
         }
         Ok(())
     }
@@ -178,9 +177,7 @@ impl NetworkApi {
             .send()
             .await?;
         if !resp.status().is_success() {
-            let s = resp.status();
-            let t = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Failed to upload part: {s} {t}"));
+            return Err(ApiError::from_response("uploadPart", resp).await.into());
         }
         let etag = resp
             .headers()
@@ -245,7 +242,7 @@ impl NetworkApi {
             .await?;
         let (status, text) = (resp.status(), resp.text().await.unwrap_or_default());
         if !status.is_success() {
-            return Err(anyhow!("finishUpload failed: HTTP {status}: {text}"));
+            return Err(ApiError::new("finishUpload", status, text).into());
         }
         Ok(serde_json::from_str(&text)?)
     }
@@ -261,7 +258,7 @@ impl NetworkApi {
         let resp = self.client.get(url).headers(headers).send().await?;
         let (status, text) = (resp.status(), resp.text().await.unwrap_or_default());
         if !status.is_success() {
-            return Err(anyhow!("getDownloadLinks failed: HTTP {status}: {text}"));
+            return Err(ApiError::new("getDownloadLinks", status, text).into());
         }
         Ok(serde_json::from_str(&text)?)
     }
@@ -270,7 +267,9 @@ impl NetworkApi {
     pub async fn download_shard_stream(&self, url: &str) -> Result<Response> {
         let resp = self.client.get(url).send().await?;
         if !resp.status().is_success() {
-            return Err(anyhow!("downloadShard failed: HTTP {}", resp.status()));
+            // The body is left unread here: a stalled shard GET must not turn
+            // the error path into a second wait. The status is what callers act on.
+            return Err(ApiError::new("downloadShard", resp.status(), "").into());
         }
         Ok(resp)
     }
@@ -290,6 +289,9 @@ impl NetworkApi {
             .header("Range", format!("bytes={start}-{end}"))
             .send()
             .await?;
+        if !resp.status().is_success() {
+            return Err(ApiError::new("downloadShard range", resp.status(), "").into());
+        }
         // 206 Partial Content on success; a server ignoring Range yields 200
         // with the whole body, which would break our offset math — reject it.
         if resp.status().as_u16() != 206 {
